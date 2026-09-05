@@ -620,6 +620,7 @@ type Model struct {
 	bars         []int
 	countBuffer  string
 	pendingTabID int
+	showHelp     bool
 }
 
 func (m *Model) getAndResetCount() int {
@@ -779,6 +780,7 @@ func initialModel() Model {
 		bars:         make([]int, 14),
 		countBuffer:  "",
 		pendingTabID: 0,
+		showHelp:     false,
 	}
 }
 
@@ -833,6 +835,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		if m.showHelp {
+			switch msg.String() {
+			case "?", "esc", "q", "enter", " ":
+				m.showHelp = false
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "q":
 			m.audio.Stop()
@@ -840,6 +850,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mpris.Update("Stopped", nil)
 			}
 			return m, tea.Quit
+
+		case "?":
+			m.pendingTabID++
+			m.countBuffer = ""
+			m.showHelp = true
+			return m, nil
 
 		case "esc":
 			m.pendingTabID++
@@ -1245,11 +1261,156 @@ func fitWidth(s string, width int) string {
 	return s + strings.Repeat(" ", width-w)
 }
 
-func (m Model) View() string {
-	if m.width == 0 || m.height == 0 {
-		return "Initializing..."
+func overlayLine(bgLine, fgLine string, x int) string {
+	fgWidth := lipgloss.Width(fgLine)
+	targetRightCol := x + fgWidth
+
+	var left strings.Builder
+	var right strings.Builder
+
+	curCol := 0
+	inEsc := false
+	var escSeq strings.Builder
+	var lastActiveStyles strings.Builder
+
+	runes := []rune(bgLine)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+
+		if r == '\x1b' {
+			inEsc = true
+			escSeq.Reset()
+			escSeq.WriteRune(r)
+			continue
+		}
+
+		if inEsc {
+			escSeq.WriteRune(r)
+			if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '~' {
+				inEsc = false
+				seq := escSeq.String()
+				if curCol <= x {
+					left.WriteString(seq)
+				}
+				if strings.HasSuffix(seq, "m") {
+					if seq == "\x1b[0m" || seq == "\x1b[m" {
+						lastActiveStyles.Reset()
+					} else {
+						lastActiveStyles.WriteString(seq)
+					}
+				}
+				if curCol >= targetRightCol {
+					right.WriteString(seq)
+				}
+			}
+			continue
+		}
+
+		w := lipgloss.Width(string(r))
+
+		if curCol+w <= x {
+			left.WriteRune(r)
+		} else if curCol < x {
+			left.WriteString(strings.Repeat(" ", x-curCol))
+		}
+
+		if curCol >= targetRightCol {
+			right.WriteRune(r)
+		}
+
+		curCol += w
 	}
 
+	leftWidth := lipgloss.Width(left.String())
+	if leftWidth < x {
+		left.WriteString(strings.Repeat(" ", x-leftWidth))
+	}
+
+	var sb strings.Builder
+	sb.WriteString(left.String())
+	sb.WriteString("\x1b[0m")
+	sb.WriteString(fgLine)
+	sb.WriteString("\x1b[0m")
+	if right.Len() > 0 {
+		sb.WriteString(lastActiveStyles.String())
+		sb.WriteString(right.String())
+		sb.WriteString("\x1b[0m")
+	}
+
+	return sb.String()
+}
+
+func overlay(bg, fg string, x, y int) string {
+	bgLines := strings.Split(bg, "\n")
+	fgLines := strings.Split(fg, "\n")
+
+	for i, fLine := range fgLines {
+		targetY := y + i
+		if targetY < 0 || targetY >= len(bgLines) {
+			continue
+		}
+		bgLines[targetY] = overlayLine(bgLines[targetY], fLine, x)
+	}
+
+	return strings.Join(bgLines, "\n")
+}
+
+func (m Model) renderHelpBox() string {
+	boxWidth := minInt(68, maxInt(40, m.width-6))
+
+	bgStyle := lipgloss.NewStyle().Background(colorSurface)
+
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(colorMauve).
+		Padding(0, 1).
+		Render("📖 KEYBOARD SHORTCUTS & HELP")
+
+	sectionStyle := bgStyle.Bold(true).Foreground(colorYellow)
+	keyStyle := bgStyle.Bold(true).Foreground(colorCyan)
+	descStyle := bgStyle.Foreground(lipgloss.Color("#CDD6F4"))
+	dimStyle := bgStyle.Foreground(colorSubtext)
+
+	row := func(key, desc string) string {
+		k := fitWidth(key, 18)
+		return bgStyle.Render("  ") + keyStyle.Render(k) + bgStyle.Render(" ") + descStyle.Render(desc)
+	}
+
+	lines := []string{
+		title,
+		"",
+		sectionStyle.Render("── Navigation & Vim Motions ────────────────────────"),
+		row("j / k, ↓ / ↑", "Move down / up (supports [count]j, e.g. 3j)"),
+		row("J / K", "Jump to Next / Previous country section"),
+		row("H / M / L", "Jump to Top / Middle / Bottom of screen"),
+		row("Ctrl+d / Ctrl+u", "Half page down / up (PgDn / PgUp)"),
+		row("gg / G", "Jump to First / Last station"),
+		"",
+		sectionStyle.Render("── Controls & Playback ─────────────────────────────"),
+		row("Enter / Space", "Play / Stop selected station"),
+		row("f", "Toggle station in/out of Favorites"),
+		row("Tab  (or 1 / 2)", "Switch between All Stations and Favorites"),
+		row("? / Esc", "Toggle / close this Help popup"),
+		row("q / Ctrl+c", "Quit iradio"),
+		"",
+		sectionStyle.Render("── Custom Stations ─────────────────────────────────"),
+		bgStyle.Render("  ") + dimStyle.Render("Config: ") + descStyle.Render("~/.config/iradio/stations.json"),
+		"",
+		dimStyle.Render("Press [?] or [Esc] to return to player"),
+	}
+
+	content := strings.Join(lines, "\n")
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorMauve).
+		Background(colorSurface).
+		Padding(0, 1).
+		Width(boxWidth).
+		Render(content)
+}
+
+func (m Model) renderMainView() string {
 	contentWidth := maxInt(40, m.width-4)
 	listHeight := m.getListHeight()
 
@@ -1422,7 +1583,7 @@ func (m Model) View() string {
 	playerCard := nowPlayingBox.Width(cardInnerWidth).Height(3).Render(nowPlayingInfo)
 
 	// 5. Help Footer
-	footerText := "[Enter/Space] Play/Stop • [f] Fav • [j/k] Move • [J/K] Country Jump • [Tab] Tab • [q] Quit"
+	footerText := "[Enter/Space] Play • [f] Fav • [j/k] Move • [J/K] Country • [Tab] Tab • [?] Help • [q] Quit"
 	var footer string
 	if m.countBuffer != "" {
 		countBadge := lipgloss.NewStyle().Background(colorMauve).Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(fmt.Sprintf(" Count: %s ", m.countBuffer))
@@ -1446,6 +1607,26 @@ func (m Model) View() string {
 	)
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(body)
+}
+
+func (m Model) View() string {
+	if m.width == 0 || m.height == 0 {
+		return "Initializing..."
+	}
+
+	mainView := m.renderMainView()
+	if !m.showHelp {
+		return mainView
+	}
+
+	helpBox := m.renderHelpBox()
+	boxWidth := lipgloss.Width(helpBox)
+	boxHeight := lipgloss.Height(helpBox)
+
+	x := maxInt(0, (m.width-boxWidth)/2)
+	y := maxInt(0, (m.height-boxHeight)/2)
+
+	return overlay(mainView, helpBox, x, y)
 }
 
 // -----------------------------------------------------------------------------
