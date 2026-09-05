@@ -206,6 +206,53 @@ var allStations = []Station{
 		Desc:      "24/7 Anime OSTs, J-Pop, Vocaloid & Game Music",
 		StreamURL: "https://stream.animenfo.com:8000/live",
 	},
+
+	// --- Singapore (YES 933, CNA938, Class 95, UFM 100.3, Kiss92) ---
+	{
+		ID:        "YES933",
+		Region:    "SG",
+		NameZh:    "YES 933 頂尖流行音樂台",
+		NameEn:    "YES 933 FM",
+		Dial:      "FM 93.3 MHz (Singapore)",
+		Desc:      "Singapore's #1 Mandarin Hit Music Station (Mediacorp)",
+		StreamURL: "https://playerservices.streamtheworld.com/api/livestream-redirect/YES933AAC.aac",
+	},
+	{
+		ID:        "CNA938",
+		Region:    "SG",
+		NameZh:    "CNA938 新加坡新聞台",
+		NameEn:    "CNA938 News Radio",
+		Dial:      "FM 93.8 MHz (Singapore)",
+		Desc:      "Singapore 24/7 News, Business & Current Affairs",
+		StreamURL: "https://playerservices.streamtheworld.com/api/livestream-redirect/938NOWAAC.aac",
+	},
+	{
+		ID:        "CLS95",
+		Region:    "SG",
+		NameZh:    "Class 95 英語音樂台",
+		NameEn:    "Class 95 FM",
+		Dial:      "FM 95.0 MHz (Singapore)",
+		Desc:      "The Best Mix of Music & Adult Contemporary",
+		StreamURL: "https://playerservices.streamtheworld.com/api/livestream-redirect/CLASS95AAC.aac",
+	},
+	{
+		ID:        "UFM100",
+		Region:    "SG",
+		NameZh:    "UFM 100.3 流行音樂",
+		NameEn:    "UFM 100.3 FM",
+		Dial:      "FM 100.3 MHz (Singapore)",
+		Desc:      "Top Mandopop Hits & Dynamic Morning Talk (SPH)",
+		StreamURL: "https://playerservices.streamtheworld.com/api/livestream-redirect/UFM_1003AAC.aac",
+	},
+	{
+		ID:        "KISS92",
+		Region:    "SG",
+		NameZh:    "Kiss92 英語流行台",
+		NameEn:    "Kiss92 FM",
+		Dial:      "FM 92.0 MHz (Singapore)",
+		Desc:      "All The Great Songs In One Place (SPH)",
+		StreamURL: "https://playerservices.streamtheworld.com/api/livestream-redirect/KISS_92AAC.aac",
+	},
 }
 
 // -----------------------------------------------------------------------------
@@ -400,6 +447,8 @@ func (m *MPRISService) Update(status string, s *Station) {
 			broadcaster = s.NameZh + " (Taiwan)"
 		} else if s.Region == "JP" {
 			broadcaster = s.NameZh + " (Japan)"
+		} else if s.Region == "SG" {
+			broadcaster = s.NameZh + " (Singapore)"
 		}
 		meta["xesam:artist"] = dbus.MakeVariant([]string{broadcaster})
 		meta["xesam:album"] = dbus.MakeVariant(s.Dial)
@@ -704,7 +753,7 @@ func (m Model) View() string {
 	// 1. Header
 	header := lipgloss.JoinHorizontal(
 		lipgloss.Center,
-		titleStyle.Render("📻 INTERNET RADIO (HK • TW • JP)"),
+		titleStyle.Render("📻 INTERNET RADIO (HK • TW • JP • SG)"),
 		lipgloss.NewStyle().Foreground(colorSubtext).Render(" • MPRIS2 Enabled"),
 	)
 
@@ -765,6 +814,8 @@ func (m Model) View() string {
 				regionTag = lipgloss.NewStyle().Foreground(colorCyan).Bold(true).Render("[TW] ")
 			case "JP":
 				regionTag = lipgloss.NewStyle().Foreground(colorPink).Bold(true).Render("[JP] ")
+			case "SG":
+				regionTag = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("[SG] ")
 			default:
 				regionTag = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("[HK] ")
 			}
