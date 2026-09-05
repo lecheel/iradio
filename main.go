@@ -253,6 +253,44 @@ var allStations = []Station{
 		Desc:      "All The Great Songs In One Place (SPH)",
 		StreamURL: "https://playerservices.streamtheworld.com/api/livestream-redirect/KISS_92AAC.aac",
 	},
+
+	// --- Malaysia (988, Ai FM, BFM 89.9, Suria FM) ---
+	{
+		ID:        "M988",
+		Region:    "MY",
+		NameZh:    "988電台",
+		NameEn:    "988 FM",
+		Dial:      "FM 98.8 MHz (Kuala Lumpur)",
+		Desc:      "Malaysia Top Chinese Hit Music & News Network",
+		StreamURL: "https://playerservices.streamtheworld.com/api/livestream-redirect/988_FMAAC.aac",
+	},
+	{
+		ID:        "AIFM",
+		Region:    "MY",
+		NameZh:    "爱FM (Ai FM)",
+		NameEn:    "Ai FM Malaysia",
+		Dial:      "FM 89.3 / 106.7 MHz",
+		Desc:      "RTM National Chinese Radio Station (Mandarin)",
+		StreamURL: "https://playerservices.streamtheworld.com/api/livestream-redirect/AI_FMAAC.aac",
+	},
+	{
+		ID:        "BFM899",
+		Region:    "MY",
+		NameZh:    "BFM 商業電台",
+		NameEn:    "BFM 89.9",
+		Dial:      "FM 89.9 MHz (Kuala Lumpur)",
+		Desc:      "The Business Station, Current Affairs & Finance (English)",
+		StreamURL: "https://playerservices.streamtheworld.com/api/livestream-redirect/BFM.mp3",
+	},
+	{
+		ID:        "SURIA",
+		Region:    "MY",
+		NameZh:    "Suria FM 陽光電台",
+		NameEn:    "Suria FM 105.3",
+		Dial:      "FM 105.3 MHz (Klang Valley)",
+		Desc:      "Segar & Terkini, Malay Hits & Entertainment (Malay)",
+		StreamURL: "https://playerservices.streamtheworld.com/api/livestream-redirect/SURIA_FMAAC.aac",
+	},
 }
 
 // -----------------------------------------------------------------------------
@@ -449,6 +487,8 @@ func (m *MPRISService) Update(status string, s *Station) {
 			broadcaster = s.NameZh + " (Japan)"
 		} else if s.Region == "SG" {
 			broadcaster = s.NameZh + " (Singapore)"
+		} else if s.Region == "MY" {
+			broadcaster = s.NameZh + " (Malaysia)"
 		}
 		meta["xesam:artist"] = dbus.MakeVariant([]string{broadcaster})
 		meta["xesam:album"] = dbus.MakeVariant(s.Dial)
@@ -800,6 +840,7 @@ var (
 	colorMauve   = lipgloss.Color("#CBA6F7")
 	colorGreen   = lipgloss.Color("#A6E3A1")
 	colorYellow  = lipgloss.Color("#F9E2AF")
+	colorPeach   = lipgloss.Color("#FAB387")
 	colorCyan    = lipgloss.Color("#89DCEB")
 	colorSubtext = lipgloss.Color("#A6ADC8")
 	colorBase    = lipgloss.Color("#1E1E2E")
@@ -880,7 +921,7 @@ func (m Model) View() string {
 	// 1. Header
 	header := lipgloss.JoinHorizontal(
 		lipgloss.Center,
-		titleStyle.Render("📻 INTERNET RADIO (HK • TW • JP • SG)"),
+		titleStyle.Render("📻 INTERNET RADIO (HK • TW • JP • SG • MY)"),
 		lipgloss.NewStyle().Foreground(colorSubtext).Render(" • MPRIS2 Enabled"),
 	)
 
@@ -926,19 +967,6 @@ func (m Model) View() string {
 
 	// 3. Station List (Strictly budgeted to listHeight lines for full-screen view)
 	var listLines []string
-	showScrollbar := totalItems > listHeight
-
-	// Scrollbar thumb metrics
-	thumbHeight := 1
-	thumbStart := 0
-	if showScrollbar {
-		thumbHeight = maxInt(1, (listHeight*listHeight)/totalItems)
-		maxOffset := totalItems - listHeight
-		if maxOffset > 0 {
-			thumbStart = (currentOffset * (listHeight - thumbHeight)) / maxOffset
-		}
-	}
-	thumbEnd := thumbStart + thumbHeight
 
 	if totalItems == 0 {
 		msg1 := lipgloss.NewStyle().Foreground(colorSubtext).Render("  No favorite stations added yet.")
@@ -981,6 +1009,8 @@ func (m Model) View() string {
 					regionTag = lipgloss.NewStyle().Foreground(colorPink).Bold(true).Render("[JP] ")
 				case "SG":
 					regionTag = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("[SG] ")
+				case "MY":
+					regionTag = lipgloss.NewStyle().Foreground(colorPeach).Bold(true).Render("[MY] ")
 				default:
 					regionTag = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("[HK] ")
 				}
@@ -1000,22 +1030,9 @@ func (m Model) View() string {
 
 				rowText := textStyle.Render(fmt.Sprintf("%s %s %s", idCol, zhCol, enCol))
 				line := fmt.Sprintf("%s%s%s %s%s %s", cursorMarker, favStar, playBadge, regionTag, rowText, dialCol)
-
-				if showScrollbar {
-					if row >= thumbStart && row < thumbEnd {
-						line += " " + lipgloss.NewStyle().Foreground(colorMauve).Render("█")
-					} else {
-						line += " " + lipgloss.NewStyle().Foreground(colorSurface).Render("│")
-					}
-				}
 				listLines = append(listLines, line)
 			} else {
-				blankLine := ""
-				if showScrollbar {
-					padSpaces := strings.Repeat(" ", maxInt(0, contentWidth-2))
-					blankLine = padSpaces + " " + lipgloss.NewStyle().Foreground(colorSurface).Render("│")
-				}
-				listLines = append(listLines, blankLine)
+				listLines = append(listLines, "")
 			}
 		}
 	}
