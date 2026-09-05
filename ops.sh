@@ -1,5 +1,5 @@
 #! /bin/bash
-echo "build radio"
-go build -o radio main.go
+echo "build iradio"
+go build -o iradio main.go
 
 

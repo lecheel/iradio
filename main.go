@@ -468,12 +468,47 @@ func tickCmd() tea.Cmd {
 	})
 }
 
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func clampOffset(cursor, offset, count, visibleHeight int) int {
+	if visibleHeight <= 0 || count == 0 {
+		return 0
+	}
+	if cursor < offset {
+		offset = cursor
+	}
+	if cursor >= offset+visibleHeight {
+		offset = cursor - visibleHeight + 1
+	}
+	if offset > count-visibleHeight {
+		offset = count - visibleHeight
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return offset
+}
+
 type Model struct {
 	width      int
 	height     int
 	activeTab  int // 0 = Stations, 1 = Favorites
 	cursor     int
 	favCursor  int
+	offset     int
+	favOffset  int
 	favorites  map[string]bool
 	audio      *AudioPlayer
 	mpris      *MPRISService
@@ -483,12 +518,29 @@ type Model struct {
 	bars       []int
 }
 
+func (m Model) getListHeight() int {
+	h := m.height - 16
+	if h < 3 {
+		return 3
+	}
+	return h
+}
+
+func (m *Model) clampOffsets() {
+	listH := m.getListHeight()
+	m.offset = clampOffset(m.cursor, m.offset, len(allStations), listH)
+	favs := m.getFavoritesList()
+	m.favOffset = clampOffset(m.favCursor, m.favOffset, len(favs), listH)
+}
+
 func initialModel() Model {
 	favs := loadFavorites()
 	return Model{
 		activeTab:  0,
 		cursor:     0,
 		favCursor:  0,
+		offset:     0,
+		favOffset:  0,
 		favorites:  favs,
 		audio:      &AudioPlayer{},
 		playingIdx: -1,
@@ -508,6 +560,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.clampOffsets()
 
 	case tickMsg:
 		if m.isPlaying {
@@ -550,14 +603,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "1":
 			m.activeTab = 0
+			m.clampOffsets()
+
 		case "2":
 			m.activeTab = 1
-			m.favCursor = 0
+			m.clampOffsets()
+
 		case "tab":
 			m.activeTab = (m.activeTab + 1) % 2
-			if m.activeTab == 1 {
-				m.favCursor = 0
-			}
+			m.clampOffsets()
 
 		case "up", "k":
 			if m.activeTab == 0 {
@@ -569,6 +623,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.favCursor--
 				}
 			}
+			m.clampOffsets()
 
 		case "down", "j":
 			if m.activeTab == 0 {
@@ -581,6 +636,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.favCursor++
 				}
 			}
+			m.clampOffsets()
+
+		case "pgup":
+			listH := m.getListHeight()
+			if m.activeTab == 0 {
+				m.cursor = maxInt(0, m.cursor-listH)
+			} else {
+				m.favCursor = maxInt(0, m.favCursor-listH)
+			}
+			m.clampOffsets()
+
+		case "pgdown":
+			listH := m.getListHeight()
+			if m.activeTab == 0 {
+				m.cursor = minInt(len(allStations)-1, m.cursor+listH)
+			} else {
+				favs := m.getFavoritesList()
+				if len(favs) > 0 {
+					m.favCursor = minInt(len(favs)-1, m.favCursor+listH)
+				}
+			}
+			m.clampOffsets()
+
+		case "home", "g":
+			if m.activeTab == 0 {
+				m.cursor = 0
+			} else {
+				m.favCursor = 0
+			}
+			m.clampOffsets()
+
+		case "end", "G":
+			if m.activeTab == 0 {
+				m.cursor = maxInt(0, len(allStations)-1)
+			} else {
+				favs := m.getFavoritesList()
+				m.favCursor = maxInt(0, len(favs)-1)
+			}
+			m.clampOffsets()
 
 		case "f":
 			target := m.getCurrentStation()
@@ -588,11 +682,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.favorites[target.ID] {
 					delete(m.favorites, target.ID)
 					m.statusMsg = fmt.Sprintf("Removed %s from favorites", target.NameEn)
+					favs := m.getFavoritesList()
+					if m.favCursor >= len(favs) && m.favCursor > 0 {
+						m.favCursor = len(favs) - 1
+					}
 				} else {
 					m.favorites[target.ID] = true
 					m.statusMsg = fmt.Sprintf("Added %s to favorites", target.NameEn)
 				}
 				saveFavorites(m.favorites)
+				m.clampOffsets()
 			}
 
 		case " ":
@@ -745,10 +844,38 @@ func padWidth(s string, width int) string {
 	return s + strings.Repeat(" ", width-w)
 }
 
+func truncateWidth(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= maxWidth {
+		return s
+	}
+	runes := []rune(s)
+	for len(runes) > 0 && lipgloss.Width(string(runes)+"…") > maxWidth {
+		runes = runes[:len(runes)-1]
+	}
+	return string(runes) + "…"
+}
+
+func fitWidth(s string, width int) string {
+	w := lipgloss.Width(s)
+	if w == width {
+		return s
+	}
+	if w > width {
+		return truncateWidth(s, width)
+	}
+	return s + strings.Repeat(" ", width-w)
+}
+
 func (m Model) View() string {
-	if m.width == 0 {
+	if m.width == 0 || m.height == 0 {
 		return "Initializing..."
 	}
+
+	contentWidth := maxInt(40, m.width-4)
+	listHeight := m.getListHeight()
 
 	// 1. Header
 	header := lipgloss.JoinHorizontal(
@@ -758,129 +885,194 @@ func (m Model) View() string {
 	)
 
 	// 2. Tabs
+	favsList := m.getFavoritesList()
+	favCount := len(favsList)
+
 	var tab1, tab2 string
 	if m.activeTab == 0 {
-		tab1 = activeTabStyle.Render("1: All Stations [1]")
-		tab2 = inactiveTabStyle.Render("2: Favorites [2]")
+		tab1 = activeTabStyle.Render(fmt.Sprintf("1: All Stations (%d/%d) [1]", m.cursor+1, len(allStations)))
+		tab2 = inactiveTabStyle.Render(fmt.Sprintf("2: Favorites (%d) [2]", favCount))
 	} else {
-		tab1 = inactiveTabStyle.Render("1: All Stations [1]")
-		tab2 = activeTabStyle.Render(fmt.Sprintf("2: Favorites (%d) [2]", len(m.getFavoritesList())))
+		currentFavPos := 0
+		if favCount > 0 {
+			currentFavPos = m.favCursor + 1
+		}
+		tab1 = inactiveTabStyle.Render(fmt.Sprintf("1: All Stations (%d) [1]", len(allStations)))
+		tab2 = activeTabStyle.Render(fmt.Sprintf("2: Favorites (%d/%d) [2]", currentFavPos, favCount))
 	}
-	tabsRow := lipgloss.JoinHorizontal(lipgloss.Top, tab1, " ", tab2)
 
-	// 3. Station List
-	var listContent strings.Builder
 	var stationsToRender []Station
 	activeCursor := m.cursor
+	currentOffset := m.offset
 
 	if m.activeTab == 0 {
 		stationsToRender = allStations
+		currentOffset = clampOffset(m.cursor, m.offset, len(allStations), listHeight)
 	} else {
-		stationsToRender = m.getFavoritesList()
+		stationsToRender = favsList
 		activeCursor = m.favCursor
+		currentOffset = clampOffset(m.favCursor, m.favOffset, favCount, listHeight)
 	}
 
-	if len(stationsToRender) == 0 {
-		listContent.WriteString(lipgloss.NewStyle().
-			Foreground(colorSubtext).
-			Padding(2, 0).
-			Render("  No favorite stations added yet.\n  Press 'f' on any station in Tab 1 to add."))
-	} else {
-		for i, st := range stationsToRender {
-			isSelected := (i == activeCursor)
-			isThisPlaying := (m.isPlaying && m.playingIdx >= 0 && allStations[m.playingIdx].ID == st.ID)
+	totalItems := len(stationsToRender)
+	scrollInfo := ""
+	if totalItems > listHeight {
+		endIdx := minInt(totalItems, currentOffset+listHeight)
+		scrollInfo = lipgloss.NewStyle().Foreground(colorSubtext).Render(
+			fmt.Sprintf("  [Showing %d-%d of %d]", currentOffset+1, endIdx, totalItems),
+		)
+	}
+	tabsRow := lipgloss.JoinHorizontal(lipgloss.Center, tab1, " ", tab2, scrollInfo)
 
-			cursorMarker := "  "
-			if isSelected {
-				cursorMarker = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("❯ ")
-			}
+	// 3. Station List (Strictly budgeted to listHeight lines for full-screen view)
+	var listLines []string
+	showScrollbar := totalItems > listHeight
 
-			favStar := "  "
-			if m.favorites[st.ID] {
-				favStar = lipgloss.NewStyle().Foreground(colorYellow).Render("★ ")
-			} else {
-				favStar = lipgloss.NewStyle().Foreground(colorSubtext).Render("☆ ")
-			}
-
-			playBadge := "       "
-			if isThisPlaying {
-				playBadge = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("▶ PLAY ")
-			}
-
-			// Region tag
-			var regionTag string
-			switch st.Region {
-			case "TW":
-				regionTag = lipgloss.NewStyle().Foreground(colorCyan).Bold(true).Render("[TW] ")
-			case "JP":
-				regionTag = lipgloss.NewStyle().Foreground(colorPink).Bold(true).Render("[JP] ")
-			case "SG":
-				regionTag = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("[SG] ")
-			default:
-				regionTag = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("[HK] ")
-			}
-
-			idCol := padWidth(st.ID, 6)
-			zhCol := padWidth(st.NameZh, 22)
-			enCol := padWidth(st.NameEn, 28)
-			dialCol := lipgloss.NewStyle().Foreground(colorSubtext).Render(fmt.Sprintf("(%s)", st.Dial))
-
-			var textStyle lipgloss.Style
-			if isSelected {
-				textStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF"))
-			} else {
-				textStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4"))
-			}
-
-			rowText := textStyle.Render(fmt.Sprintf("%s %s %s", idCol, zhCol, enCol))
-			listContent.WriteString(fmt.Sprintf("%s%s%s %s%s %s\n", cursorMarker, favStar, playBadge, regionTag, rowText, dialCol))
+	// Scrollbar thumb metrics
+	thumbHeight := 1
+	thumbStart := 0
+	if showScrollbar {
+		thumbHeight = maxInt(1, (listHeight*listHeight)/totalItems)
+		maxOffset := totalItems - listHeight
+		if maxOffset > 0 {
+			thumbStart = (currentOffset * (listHeight - thumbHeight)) / maxOffset
 		}
 	}
+	thumbEnd := thumbStart + thumbHeight
 
-	// 4. Equalizer / Now Playing Panel
+	if totalItems == 0 {
+		msg1 := lipgloss.NewStyle().Foreground(colorSubtext).Render("  No favorite stations added yet.")
+		msg2 := lipgloss.NewStyle().Foreground(colorSubtext).Render("  Press 'f' on any station in Tab 1 to add.")
+		listLines = append(listLines, msg1, msg2)
+		for len(listLines) < listHeight {
+			listLines = append(listLines, "")
+		}
+	} else {
+		for row := 0; row < listHeight; row++ {
+			itemIdx := currentOffset + row
+			if itemIdx < totalItems {
+				st := stationsToRender[itemIdx]
+				isSelected := (itemIdx == activeCursor)
+				isThisPlaying := (m.isPlaying && m.playingIdx >= 0 && allStations[m.playingIdx].ID == st.ID)
+
+				cursorMarker := "  "
+				if isSelected {
+					cursorMarker = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("❯ ")
+				}
+
+				favStar := "  "
+				if m.favorites[st.ID] {
+					favStar = lipgloss.NewStyle().Foreground(colorYellow).Render("★ ")
+				} else {
+					favStar = lipgloss.NewStyle().Foreground(colorSubtext).Render("☆ ")
+				}
+
+				playBadge := "       "
+				if isThisPlaying {
+					playBadge = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("▶ PLAY ")
+				}
+
+				// Region tag
+				var regionTag string
+				switch st.Region {
+				case "TW":
+					regionTag = lipgloss.NewStyle().Foreground(colorCyan).Bold(true).Render("[TW] ")
+				case "JP":
+					regionTag = lipgloss.NewStyle().Foreground(colorPink).Bold(true).Render("[JP] ")
+				case "SG":
+					regionTag = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("[SG] ")
+				default:
+					regionTag = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("[HK] ")
+				}
+
+				// Exact original column widths preserving alignment
+				idCol := padWidth(st.ID, 6)
+				zhCol := padWidth(st.NameZh, 22)
+				enCol := padWidth(st.NameEn, 28)
+				dialCol := lipgloss.NewStyle().Foreground(colorSubtext).Render(fmt.Sprintf("(%s)", st.Dial))
+
+				var textStyle lipgloss.Style
+				if isSelected {
+					textStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF"))
+				} else {
+					textStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4"))
+				}
+
+				rowText := textStyle.Render(fmt.Sprintf("%s %s %s", idCol, zhCol, enCol))
+				line := fmt.Sprintf("%s%s%s %s%s %s", cursorMarker, favStar, playBadge, regionTag, rowText, dialCol)
+
+				if showScrollbar {
+					if row >= thumbStart && row < thumbEnd {
+						line += " " + lipgloss.NewStyle().Foreground(colorMauve).Render("█")
+					} else {
+						line += " " + lipgloss.NewStyle().Foreground(colorSurface).Render("│")
+					}
+				}
+				listLines = append(listLines, line)
+			} else {
+				blankLine := ""
+				if showScrollbar {
+					padSpaces := strings.Repeat(" ", maxInt(0, contentWidth-2))
+					blankLine = padSpaces + " " + lipgloss.NewStyle().Foreground(colorSurface).Render("│")
+				}
+				listLines = append(listLines, blankLine)
+			}
+		}
+	}
+	listBlock := strings.Join(listLines, "\n")
+
+	// 4. Equalizer / Now Playing Panel (Fixed 3 content lines, 5 total with borders)
 	var eqBar strings.Builder
 	eqChars := []string{" ", " ", "▂", "▃", "▄", "▅", "▆", "▇"}
 	for _, val := range m.bars {
 		eqBar.WriteString(eqChars[val])
 	}
 
-	nowPlayingInfo := "Status: Stopped"
+	cardInnerWidth := maxInt(20, contentWidth-4)
+	lblTitle := lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render(fitWidth("▶ Title:", 12))
+	lblDesc := lipgloss.NewStyle().Foreground(colorSubtext).Render(fitWidth("  Describe:", 12))
+	lblNotice := lipgloss.NewStyle().Foreground(colorYellow).Render(fitWidth("  Notice:", 12))
+
+	var cardLine1, cardLine2, cardLine3 string
 	if m.isPlaying && m.playingIdx >= 0 {
 		curr := allStations[m.playingIdx]
 		eqStyled := lipgloss.NewStyle().Foreground(colorGreen).Render(eqBar.String())
 
-		lblTitle := lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render(padWidth("▶ Title:", 13))
-		lblDesc := lipgloss.NewStyle().Foreground(colorSubtext).Render(padWidth("  Describe:", 13))
+		rawTitle := fmt.Sprintf("[%s] %s  %s  (%s)", curr.Region, curr.NameZh, curr.NameEn, curr.Dial)
+		cardLine1 = lblTitle + lipgloss.NewStyle().Bold(true).Render(fitWidth(rawTitle, maxInt(10, cardInnerWidth-12)))
 
-		stationTitle := fmt.Sprintf("[%s] %s  %s  (%s)", curr.Region, curr.NameZh, curr.NameEn, curr.Dial)
-		stationDesc := fmt.Sprintf("%s  %s", eqStyled, curr.Desc)
-
-		nowPlayingInfo = fmt.Sprintf("%s%s\n%s%s", lblTitle, stationTitle, lblDesc, stationDesc)
+		descAvail := maxInt(10, cardInnerWidth-12-lipgloss.Width(eqStyled)-2)
+		cardLine2 = lblDesc + fmt.Sprintf("%s  %s", eqStyled, fitWidth(curr.Desc, descAvail))
+	} else {
+		cardLine1 = lblTitle + lipgloss.NewStyle().Foreground(colorSubtext).Render("Stopped")
+		cardLine2 = lblDesc + lipgloss.NewStyle().Foreground(colorSubtext).Render("Select a station and press [Space] to play")
 	}
 
 	if m.statusMsg != "" {
-		lblNotice := lipgloss.NewStyle().Foreground(colorYellow).Render(padWidth("  Notice:", 13))
-		nowPlayingInfo += "\n" + lblNotice + lipgloss.NewStyle().Foreground(colorYellow).Render(m.statusMsg)
+		cardLine3 = lblNotice + lipgloss.NewStyle().Foreground(colorYellow).Render(fitWidth(m.statusMsg, maxInt(10, cardInnerWidth-12)))
+	} else {
+		cardLine3 = ""
 	}
 
-	playerCard := nowPlayingBox.Width(m.width - 4).Render(nowPlayingInfo)
+	nowPlayingInfo := fmt.Sprintf("%s\n%s\n%s", cardLine1, cardLine2, cardLine3)
+	playerCard := nowPlayingBox.Width(cardInnerWidth).Height(3).Render(nowPlayingInfo)
 
 	// 5. Help Footer
 	footer := helpStyle.Render(
-		"[Space] Play/Stop • [f] Favorite/Unfav • [1/2] Switch Tab • [↑/↓, j/k] Navigate • [q] Quit",
+		"[Space] Play/Stop • [f] Fav • [1/2] Tab • [↑/↓, j/k] Navigate • [PgUp/PgDn] Page • [q] Quit",
 	)
 
-	// Assemble layout
+	// Assemble layout to fill the exact full-screen window
 	body := lipgloss.JoinVertical(
 		lipgloss.Left,
 		header,
-		"\n",
+		"",
 		tabsRow,
-		"\n",
-		listContent.String(),
-		"\n",
+		"",
+		listBlock,
+		"",
 		playerCard,
-		"\n",
+		"",
 		footer,
 	)
 
