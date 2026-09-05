@@ -1,26 +1,35 @@
-name: Build & Test
+name: Build & Package
 
 on:
   push:
     branches: [ "main", "master" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build (${{ matrix.os }})
+  build-and-package:
+    name: Build & Package (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin_name: iradio
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bin_name: iradio
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin_name: iradio.exe
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Audio & SSL dependencies often required by radio/streamer crates on Linux
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -33,26 +42,29 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Cargo Check
-        run: cargo check --verbose
-
-      - name: Build (Release)
+      - name: Build release binary
         run: cargo build --release --verbose
 
       - name: Run Tests
         run: cargo test --verbose
 
-      # Upload the compiled binary as a downloadable artifact
-      - name: Upload Binary (Linux/macOS)
+      - name: Package into tar.gz (Linux / macOS)
         if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: iradio-${{ matrix.os }}
-          path: target/release/iradio
+        run: |
+          mkdir -p dist
+          tar -czvf dist/iradio-${{ matrix.target }}.tar.gz -C target/release ${{ matrix.bin_name }}
 
-      - name: Upload Binary (Windows)
+      # Windows runner has bsdtar/tar pre-installed in PowerShell/cmd
+      - name: Package into tar.gz (Windows)
         if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -czvf dist/iradio-${{ matrix.target }}.tar.gz -C target/release ${{ matrix.bin_name }}
+
+      - name: Upload .tar.gz Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: iradio-${{ matrix.os }}
-          path: target/release/iradio.exe
+          name: iradio-${{ matrix.target }}.tar.gz
+          path: dist/iradio-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
