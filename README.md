@@ -55,7 +55,7 @@ go run main.go
 make build
 
 # Run built binary
-./dist/rthk-radio
+./dist/iradio
 
 # Cross-compile for Linux and macOS (amd64 & arm64)
 make build-all

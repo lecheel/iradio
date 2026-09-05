@@ -1,4 +1,4 @@
-module rthk-radio
+module iradio
 
 go 1.25.0
 

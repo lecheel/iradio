@@ -1,4 +1,4 @@
-BINARY_NAME := rthk-radio
+BINARY_NAME := iradio
 DIST_DIR    := dist
 SRC         := main.go
 LDFLAGS     := -s -w
