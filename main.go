@@ -579,11 +579,6 @@ func absInt(n int) int {
 	return n
 }
 
-type tabSwitchTimeoutMsg struct {
-	id  int
-	tab int
-}
-
 func clampOffset(cursor, offset, count, visibleHeight int) int {
 	if visibleHeight <= 0 || count == 0 {
 		return 0
@@ -827,13 +822,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectPrevStation()
 		}
 
-	case tabSwitchTimeoutMsg:
-		if msg.id == m.pendingTabID && (m.countBuffer == "1" || m.countBuffer == "2") {
-			m.activeTab = msg.tab
-			m.countBuffer = ""
-			m.clampOffsets()
-		}
-
 	case tea.KeyMsg:
 		if m.showHelp {
 			switch msg.String() {
@@ -861,23 +849,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingTabID++
 			m.countBuffer = ""
 
-		case "1", "2":
-			if m.countBuffer == "" {
-				m.countBuffer = msg.String()
-				m.pendingTabID++
-				id := m.pendingTabID
-				tabIdx := 0
-				if msg.String() == "2" {
-					tabIdx = 1
-				}
-				cmds = append(cmds, tea.Tick(260*time.Millisecond, func(t time.Time) tea.Msg {
-					return tabSwitchTimeoutMsg{id: id, tab: tabIdx}
-				}))
-			} else {
-				m.countBuffer += msg.String()
-			}
+		case "f1":
+			m.pendingTabID++
+			m.countBuffer = ""
+			m.activeTab = 0
+			m.clampOffsets()
 
-		case "3", "4", "5", "6", "7", "8", "9":
+		case "f2":
+			m.pendingTabID++
+			m.countBuffer = ""
+			m.activeTab = 1
+			m.clampOffsets()
+
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			m.pendingTabID++
 			m.countBuffer += msg.String()
 
@@ -1390,7 +1374,7 @@ func (m Model) renderHelpBox() string {
 		sectionStyle.Render("── Controls & Playback ─────────────────────────────"),
 		row("Enter / Space", "Play / Stop selected station"),
 		row("f", "Toggle station in/out of Favorites"),
-		row("Tab  (or 1 / 2)", "Switch between All Stations and Favorites"),
+		row("Tab  (or F1 / F2)", "Switch between All Stations and Favorites"),
 		row("? / Esc", "Toggle / close this Help popup"),
 		row("q / Ctrl+c", "Quit iradio"),
 		"",
@@ -1427,15 +1411,15 @@ func (m Model) renderMainView() string {
 
 	var tab1, tab2 string
 	if m.activeTab == 0 {
-		tab1 = activeTabStyle.Render(fmt.Sprintf("1: All Stations (%d/%d) [1]", m.cursor+1, len(allStations)))
-		tab2 = inactiveTabStyle.Render(fmt.Sprintf("2: Favorites (%d) [2]", favCount))
+		tab1 = activeTabStyle.Render(fmt.Sprintf("1: All Stations (%d/%d) [F1]", m.cursor+1, len(allStations)))
+		tab2 = inactiveTabStyle.Render(fmt.Sprintf("2: Favorites (%d) [F2]", favCount))
 	} else {
 		currentFavPos := 0
 		if favCount > 0 {
 			currentFavPos = m.favCursor + 1
 		}
-		tab1 = inactiveTabStyle.Render(fmt.Sprintf("1: All Stations (%d) [1]", len(allStations)))
-		tab2 = activeTabStyle.Render(fmt.Sprintf("2: Favorites (%d/%d) [2]", currentFavPos, favCount))
+		tab1 = inactiveTabStyle.Render(fmt.Sprintf("1: All Stations (%d) [F1]", len(allStations)))
+		tab2 = activeTabStyle.Render(fmt.Sprintf("2: Favorites (%d/%d) [F2]", currentFavPos, favCount))
 	}
 
 	var stationsToRender []Station
