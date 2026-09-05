@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,7 +98,16 @@ var allStations = []Station{
 		StreamURL: "https://rthkaudio6cnr-lh.akamaihd.net/i/radio6cnr_1@575604/master.m3u8",
 	},
 
-	// --- Taiwan (News98, UFO, ICRT, Bravo, Classical) ---
+	// --- Taiwan (Hit FM, News98, UFO, ICRT, Bravo, Classical) ---
+	{
+		ID:        "HITFM",
+		Region:    "TW",
+		NameZh:    "Hit FM 聯播網",
+		NameEn:    "Hit FM 107.7",
+		Dial:      "FM 107.7 MHz (Taipei)",
+		Desc:      "Taiwan's #1 Hit Music Station (Taipei/Hitoradio)",
+		StreamURL: "https://www.hitoradio.com/newweb/hichannel.php?channelID=1&action=getLIVEURL",
+	},
 	{
 		ID:        "N98",
 		Region:    "TW",
@@ -303,8 +314,46 @@ type AudioPlayer struct {
 	cancel context.CancelFunc
 }
 
+func resolveStreamURL(u string) string {
+	if strings.Contains(u, "hitoradio.com") && strings.Contains(u, "getLIVEURL") {
+		client := &http.Client{Timeout: 5 * time.Second}
+		req, err := http.NewRequest("GET", u, nil)
+		if err == nil {
+			req.Header.Set("User-Agent", "Mozilla/5.0")
+			req.Header.Set("Referer", "https://www.hitoradio.com/")
+			resp, err := client.Do(req)
+			if err == nil {
+				defer resp.Body.Close()
+				b, _ := io.ReadAll(resp.Body)
+				target := strings.TrimSpace(string(b))
+				if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+					return target
+				}
+			}
+		}
+
+		postReq, err := http.NewRequest("POST", "https://www.hitoradio.com/mobile/hichannel.php", strings.NewReader("channelID=1&action=getLIVEURL"))
+		if err == nil {
+			postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			postReq.Header.Set("User-Agent", "Mozilla/5.0")
+			postReq.Header.Set("Referer", "https://www.hitoradio.com/")
+			resp, err := client.Do(postReq)
+			if err == nil {
+				defer resp.Body.Close()
+				b, _ := io.ReadAll(resp.Body)
+				target := strings.TrimSpace(string(b))
+				if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+					return target
+				}
+			}
+		}
+	}
+	return u
+}
+
 func (p *AudioPlayer) Play(url string) error {
 	p.Stop()
+	url = resolveStreamURL(url)
 
 	var playerBin string
 	var args []string
