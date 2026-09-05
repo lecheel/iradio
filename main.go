@@ -896,7 +896,7 @@ func getFavFilePath() string {
 	if err != nil {
 		configDir = os.Getenv("HOME")
 	}
-	dir := filepath.Join(configDir, "rthk-radio")
+	dir := filepath.Join(configDir, "iradio")
 	_ = os.MkdirAll(dir, 0755)
 	return filepath.Join(dir, "favorites.json")
 }
