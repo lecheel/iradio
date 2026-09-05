@@ -18,19 +18,22 @@ import (
 	"github.com/godbus/dbus/v5/prop"
 )
 
-// Station represents an RTHK broadcast channel.
+// Station represents a broadcast channel.
 type Station struct {
-	ID       string
-	NameZh   string
-	NameEn   string
-	Dial     string
-	Desc     string
+	ID        string
+	Region    string // "HK" or "TW"
+	NameZh    string
+	NameEn    string
+	Dial      string
+	Desc      string
 	StreamURL string
 }
 
-var rthkStations = []Station{
+var allStations = []Station{
+	// --- Hong Kong (RTHK) ---
 	{
 		ID:        "R1",
+		Region:    "HK",
 		NameZh:    "香港電台第一台",
 		NameEn:    "RTHK Radio 1",
 		Dial:      "FM 92.6 - 94.4 MHz",
@@ -39,6 +42,7 @@ var rthkStations = []Station{
 	},
 	{
 		ID:        "R2",
+		Region:    "HK",
 		NameZh:    "香港電台第二台",
 		NameEn:    "RTHK Radio 2",
 		Dial:      "FM 94.8 - 96.9 MHz",
@@ -47,6 +51,7 @@ var rthkStations = []Station{
 	},
 	{
 		ID:        "R3",
+		Region:    "HK",
 		NameZh:    "香港電台第三台",
 		NameEn:    "RTHK Radio 3",
 		Dial:      "AM 567 / AM 1584 kHz / FM 97.9 - 106.8 MHz",
@@ -55,6 +60,7 @@ var rthkStations = []Station{
 	},
 	{
 		ID:        "R4",
+		Region:    "HK",
 		NameZh:    "香港電台第四台",
 		NameEn:    "RTHK Radio 4",
 		Dial:      "FM 97.6 - 98.9 MHz",
@@ -63,6 +69,7 @@ var rthkStations = []Station{
 	},
 	{
 		ID:        "R5",
+		Region:    "HK",
 		NameZh:    "香港電台第五台",
 		NameEn:    "RTHK Radio 5",
 		Dial:      "AM 783 kHz / FM 92.3 - 106.8 MHz",
@@ -70,7 +77,8 @@ var rthkStations = []Station{
 		StreamURL: "https://rthkaudio5-lh.akamaihd.net/i/radio5_1@355868/master.m3u8",
 	},
 	{
-		ID:        "PT",
+		ID:        "PTH",
+		Region:    "HK",
 		NameZh:    "香港電台普通話台",
 		NameEn:    "RTHK Putonghua Channel",
 		Dial:      "AM 621 kHz / FM 100.9 - 103.3 MHz",
@@ -79,11 +87,86 @@ var rthkStations = []Station{
 	},
 	{
 		ID:        "R6",
+		Region:    "HK",
 		NameZh:    "香港電台第六台 (CNR)",
 		NameEn:    "RTHK Radio 6 / Voice of HK",
 		Dial:      "AM 675 kHz",
 		Desc:      "Relay of China National Radio Voice of Hong Kong",
 		StreamURL: "https://rthkaudio6cnr-lh.akamaihd.net/i/radio6cnr_1@575604/master.m3u8",
+	},
+
+	// --- Taiwan (News98, UFO, ICRT, Bravo, Classical) ---
+	{
+		ID:        "N98",
+		Region:    "TW",
+		NameZh:    "九八新聞台",
+		NameEn:    "News98 FM 98.1",
+		Dial:      "FM 98.1 MHz",
+		Desc:      "Taiwan 24/7 News, Finance, Analysis & Talk (Taipei)",
+		StreamURL: "https://stream.rcs.revma.com/pntx1639ntzuv.m4a",
+	},
+	{
+		ID:        "UFO",
+		Region:    "TW",
+		NameZh:    "飛碟聯播網",
+		NameEn:    "UFO Radio FM 92.1",
+		Dial:      "FM 92.1 MHz",
+		Desc:      "Pop Music, Talk Shows & Lifestyle (Taiwan)",
+		StreamURL: "https://stream.rcs.revma.com/em90w4aeewzuv.m4a",
+	},
+	{
+		ID:        "ICRT",
+		Region:    "TW",
+		NameZh:    "台北國際社區廣播電台",
+		NameEn:    "ICRT FM 100",
+		Dial:      "FM 100.7 MHz",
+		Desc:      "Taiwan's Premier English Radio Station",
+		StreamURL: "https://stream.rcs.revma.com/nkdfurztxp3vv",
+	},
+	{
+		ID:        "BRAVO",
+		Region:    "TW",
+		NameZh:    "台北都會音樂台",
+		NameEn:    "Bravo FM 91.3",
+		Dial:      "FM 91.3 MHz",
+		Desc:      "Jazz, Classical & Urban Lifestyle (Taipei)",
+		StreamURL: "https://onair.bravo913.com.tw:9130/live.mp3",
+	},
+	{
+		ID:        "CFM",
+		Region:    "TW",
+		NameZh:    "好家庭古典音樂台",
+		NameEn:    "Classical FM 97.7",
+		Dial:      "FM 97.7 MHz",
+		Desc:      "Classical Music, Philosophy & Arts (Taichung)",
+		StreamURL: "https://onair.family977.com.tw:8977/live.mp3",
+	},
+	{
+		ID:        "BCCN",
+		Region:    "TW",
+		NameZh:    "中廣新聞網",
+		NameEn:    "BCC News Radio",
+		Dial:      "AM 648 kHz / App",
+		Desc:      "Taiwan BCC 24/7 Professional News Network",
+		StreamURL: "https://stream.rcs.revma.com/78fm9wyy2tzuv",
+	},
+	{
+		ID:        "BCCM",
+		Region:    "TW",
+		NameZh:    "中廣音樂網 (i radio)",
+		NameEn:    "BCC i Radio / Music",
+		Dial:      "FM 96.3 MHz / Web",
+		Desc:      "Taiwan & Mandopop Non-stop Music Station",
+		StreamURL: "https://stream.rcs.revma.com/ndk05tyy2tzuv",
+	},
+	{
+		ID:        "BCCP",
+		Region:    "TW",
+		NameZh:    "中廣流行網",
+		NameEn:    "BCC i like radio",
+		Dial:      "FM 103.3 MHz",
+		Desc:      "Taiwan Pop Culture, Lifestyle & Talk",
+		StreamURL: "https://stream.rcs.revma.com/aw9uqyxy2tzuv",
 	},
 }
 
@@ -99,7 +182,6 @@ type AudioPlayer struct {
 func (p *AudioPlayer) Play(url string) error {
 	p.Stop()
 
-	// Check available players
 	var playerBin string
 	var args []string
 	if _, err := exec.LookPath("mpv"); err == nil {
@@ -203,9 +285,9 @@ func (m *mprisPlayer) Play() *dbus.Error {
 	return nil
 }
 
-func (m *mprisPlayer) Seek(offset int64) *dbus.Error                           { return nil }
+func (m *mprisPlayer) Seek(offset int64) *dbus.Error                              { return nil }
 func (m *mprisPlayer) SetPosition(trackId dbus.ObjectPath, pos int64) *dbus.Error { return nil }
-func (m *mprisPlayer) OpenUri(uri string) *dbus.Error                         { return nil }
+func (m *mprisPlayer) OpenUri(uri string) *dbus.Error                             { return nil }
 
 type MPRISService struct {
 	conn       *dbus.Conn
@@ -235,9 +317,9 @@ func startMPRIS(p *tea.Program) *MPRISService {
 			"CanQuit":             {Value: true, Writable: false, Emit: prop.EmitTrue},
 			"CanRaise":            {Value: false, Writable: false, Emit: prop.EmitTrue},
 			"HasTrackList":        {Value: false, Writable: false, Emit: prop.EmitTrue},
-			"Identity":            {Value: "RTHK Radio", Writable: false, Emit: prop.EmitTrue},
+			"Identity":            {Value: "HK & Taiwan Internet Radio", Writable: false, Emit: prop.EmitTrue},
 			"SupportedUriSchemes": {Value: []string{"http", "https"}, Writable: false, Emit: prop.EmitTrue},
-			"SupportedMimeTypes":  {Value: []string{"audio/mpeg", "application/x-mpegurl"}, Writable: false, Emit: prop.EmitTrue},
+			"SupportedMimeTypes":  {Value: []string{"audio/mpeg", "application/x-mpegurl", "audio/aac"}, Writable: false, Emit: prop.EmitTrue},
 		},
 		"org.mpris.MediaPlayer2.Player": {
 			"PlaybackStatus": {Value: "Stopped", Writable: false, Emit: prop.EmitTrue},
@@ -275,14 +357,18 @@ func (m *MPRISService) Update(status string, s *Station) {
 	if s != nil {
 		meta["mpris:trackid"] = dbus.MakeVariant(dbus.ObjectPath("/org/mpris/MediaPlayer2/track/0"))
 		meta["xesam:title"] = dbus.MakeVariant(s.NameZh + " (" + s.NameEn + ")")
-		meta["xesam:artist"] = dbus.MakeVariant([]string{"RTHK 香港電台"})
+		broadcaster := "RTHK 香港電台"
+		if s.Region == "TW" {
+			broadcaster = s.NameZh + " (Taiwan)"
+		}
+		meta["xesam:artist"] = dbus.MakeVariant([]string{broadcaster})
 		meta["xesam:album"] = dbus.MakeVariant(s.Dial)
 	}
 	m.properties.Set("org.mpris.MediaPlayer2.Player", "Metadata", dbus.MakeVariant(meta))
 }
 
 // -----------------------------------------------------------------------------
-// Bubbletea TUI Model
+// Bubble Tea TUI Model
 // -----------------------------------------------------------------------------
 
 type tickMsg time.Time
@@ -294,18 +380,18 @@ func tickCmd() tea.Cmd {
 }
 
 type Model struct {
-	width       int
-	height      int
-	activeTab   int // 0 = Stations, 1 = Favorites
-	cursor      int
-	favCursor   int
-	favorites   map[string]bool
-	audio       *AudioPlayer
-	mpris       *MPRISService
-	playingIdx  int // index in rthkStations, or -1 if stopped
-	isPlaying   bool
-	statusMsg   string
-	bars        []int
+	width      int
+	height     int
+	activeTab  int // 0 = Stations, 1 = Favorites
+	cursor     int
+	favCursor  int
+	favorites  map[string]bool
+	audio      *AudioPlayer
+	mpris      *MPRISService
+	playingIdx int // index in allStations, or -1 if stopped
+	isPlaying  bool
+	statusMsg  string
+	bars       []int
 }
 
 func initialModel() Model {
@@ -397,7 +483,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "down", "j":
 			if m.activeTab == 0 {
-				if m.cursor < len(rthkStations)-1 {
+				if m.cursor < len(allStations)-1 {
 					m.cursor++
 				}
 			} else {
@@ -430,8 +516,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) getCurrentStation() *Station {
 	if m.activeTab == 0 {
-		if m.cursor >= 0 && m.cursor < len(rthkStations) {
-			return &rthkStations[m.cursor]
+		if m.cursor >= 0 && m.cursor < len(allStations) {
+			return &allStations[m.cursor]
 		}
 	} else {
 		favs := m.getFavoritesList()
@@ -444,7 +530,7 @@ func (m *Model) getCurrentStation() *Station {
 
 func (m *Model) getFavoritesList() []Station {
 	var list []Station
-	for _, st := range rthkStations {
+	for _, st := range allStations {
 		if m.favorites[st.ID] {
 			list = append(list, st)
 		}
@@ -459,14 +545,13 @@ func (m *Model) togglePlay() {
 	}
 
 	targetIdx := -1
-	for idx, s := range rthkStations {
+	for idx, s := range allStations {
 		if s.ID == target.ID {
 			targetIdx = idx
 			break
 		}
 	}
 
-	// If already playing this station, stop it
 	if m.isPlaying && m.playingIdx == targetIdx {
 		m.audio.Stop()
 		m.isPlaying = false
@@ -477,7 +562,6 @@ func (m *Model) togglePlay() {
 		return
 	}
 
-	// Start playing
 	err := m.audio.Play(target.StreamURL)
 	if err != nil {
 		m.statusMsg = fmt.Sprintf("Audio Error: %v", err)
@@ -487,18 +571,18 @@ func (m *Model) togglePlay() {
 
 	m.isPlaying = true
 	m.playingIdx = targetIdx
-	m.statusMsg = fmt.Sprintf("Playing live: %s", target.NameEn)
+	m.statusMsg = fmt.Sprintf("Playing live: [%s] %s", target.Region, target.NameEn)
 	if m.mpris != nil {
 		m.mpris.Update("Playing", target)
 	}
 }
 
 func (m *Model) selectNextStation() {
-	if len(rthkStations) == 0 {
+	if len(allStations) == 0 {
 		return
 	}
-	m.playingIdx = (m.playingIdx + 1) % len(rthkStations)
-	st := &rthkStations[m.playingIdx]
+	m.playingIdx = (m.playingIdx + 1) % len(allStations)
+	st := &allStations[m.playingIdx]
 	_ = m.audio.Play(st.StreamURL)
 	m.isPlaying = true
 	if m.mpris != nil {
@@ -507,11 +591,11 @@ func (m *Model) selectNextStation() {
 }
 
 func (m *Model) selectPrevStation() {
-	if len(rthkStations) == 0 {
+	if len(allStations) == 0 {
 		return
 	}
-	m.playingIdx = (m.playingIdx - 1 + len(rthkStations)) % len(rthkStations)
-	st := &rthkStations[m.playingIdx]
+	m.playingIdx = (m.playingIdx - 1 + len(allStations)) % len(allStations)
+	st := &allStations[m.playingIdx]
 	_ = m.audio.Play(st.StreamURL)
 	m.isPlaying = true
 	if m.mpris != nil {
@@ -520,17 +604,17 @@ func (m *Model) selectPrevStation() {
 }
 
 // -----------------------------------------------------------------------------
-// UI Rendering with Lip Gloss
+// UI Styling & Rendering
 // -----------------------------------------------------------------------------
 
 var (
-	colorPink   = lipgloss.Color("#F38BA8")
-	colorMauve  = lipgloss.Color("#CBA6F7")
-	colorGreen  = lipgloss.Color("#A6E3A1")
-	colorYellow = lipgloss.Color("#F9E2AF")
-	colorSubtext= lipgloss.Color("#A6ADC8")
-	colorBase   = lipgloss.Color("#1E1E2E")
-	colorSurface= lipgloss.Color("#313244")
+	colorMauve   = lipgloss.Color("#CBA6F7")
+	colorGreen   = lipgloss.Color("#A6E3A1")
+	colorYellow  = lipgloss.Color("#F9E2AF")
+	colorCyan    = lipgloss.Color("#89DCEB")
+	colorSubtext = lipgloss.Color("#A6ADC8")
+	colorBase    = lipgloss.Color("#1E1E2E")
+	colorSurface = lipgloss.Color("#313244")
 
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -547,11 +631,11 @@ var (
 			Padding(0, 2)
 
 	inactiveTabStyle = lipgloss.NewStyle().
-			Background(colorBase).
-			Foreground(colorSubtext).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorSurface).
-			Padding(0, 2)
+				Background(colorBase).
+				Foreground(colorSubtext).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorSurface).
+				Padding(0, 2)
 
 	nowPlayingBox = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -563,6 +647,14 @@ var (
 			Italic(true)
 )
 
+func padWidth(s string, width int) string {
+	w := lipgloss.Width(s)
+	if w >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-w)
+}
+
 func (m Model) View() string {
 	if m.width == 0 {
 		return "Initializing..."
@@ -571,7 +663,7 @@ func (m Model) View() string {
 	// 1. Header
 	header := lipgloss.JoinHorizontal(
 		lipgloss.Center,
-		titleStyle.Render("📻 RTHK INTERNET RADIO (香港電台)"),
+		titleStyle.Render("📻 INTERNET RADIO (HK & TAIWAN)"),
 		lipgloss.NewStyle().Foreground(colorSubtext).Render(" • MPRIS2 Enabled"),
 	)
 
@@ -592,7 +684,7 @@ func (m Model) View() string {
 	activeCursor := m.cursor
 
 	if m.activeTab == 0 {
-		stationsToRender = rthkStations
+		stationsToRender = allStations
 	} else {
 		stationsToRender = m.getFavoritesList()
 		activeCursor = m.favCursor
@@ -606,7 +698,7 @@ func (m Model) View() string {
 	} else {
 		for i, st := range stationsToRender {
 			isSelected := (i == activeCursor)
-			isThisPlaying := (m.isPlaying && m.playingIdx >= 0 && rthkStations[m.playingIdx].ID == st.ID)
+			isThisPlaying := (m.isPlaying && m.playingIdx >= 0 && allStations[m.playingIdx].ID == st.ID)
 
 			cursorMarker := "  "
 			if isSelected {
@@ -625,16 +717,28 @@ func (m Model) View() string {
 				playBadge = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("▶ PLAY ")
 			}
 
-			rowTitle := fmt.Sprintf("%-2s %-16s %s", st.ID, st.NameZh, st.NameEn)
-			if isSelected {
-				rowTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render(rowTitle)
+			// Region tag
+			var regionTag string
+			if st.Region == "TW" {
+				regionTag = lipgloss.NewStyle().Foreground(colorCyan).Bold(true).Render("[TW] ")
 			} else {
-				rowTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4")).Render(rowTitle)
+				regionTag = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("[HK] ")
 			}
 
-			dialInfo := lipgloss.NewStyle().Foreground(colorSubtext).Render(fmt.Sprintf("(%s)", st.Dial))
+			idCol := padWidth(st.ID, 6)
+			zhCol := padWidth(st.NameZh, 22)
+			enCol := padWidth(st.NameEn, 28)
+			dialCol := lipgloss.NewStyle().Foreground(colorSubtext).Render(fmt.Sprintf("(%s)", st.Dial))
 
-			listContent.WriteString(fmt.Sprintf("%s%s%s %-46s %s\n", cursorMarker, favStar, playBadge, rowTitle, dialInfo))
+			var textStyle lipgloss.Style
+			if isSelected {
+				textStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF"))
+			} else {
+				textStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4"))
+			}
+
+			rowText := textStyle.Render(fmt.Sprintf("%s %s %s", idCol, zhCol, enCol))
+			listContent.WriteString(fmt.Sprintf("%s%s%s %s%s %s\n", cursorMarker, favStar, playBadge, regionTag, rowText, dialCol))
 		}
 	}
 
@@ -647,14 +751,21 @@ func (m Model) View() string {
 
 	nowPlayingInfo := "Status: Stopped"
 	if m.isPlaying && m.playingIdx >= 0 {
-		curr := rthkStations[m.playingIdx]
+		curr := allStations[m.playingIdx]
 		eqStyled := lipgloss.NewStyle().Foreground(colorGreen).Render(eqBar.String())
-		nowPlayingInfo = fmt.Sprintf("▶ Tuning: %s %s [%s]\n  %s  %s",
-			curr.NameZh, curr.NameEn, curr.Dial, eqStyled, curr.Desc)
+
+		lblTitle := lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render(padWidth("▶ Title:", 13))
+		lblDesc := lipgloss.NewStyle().Foreground(colorSubtext).Render(padWidth("  Describe:", 13))
+
+		stationTitle := fmt.Sprintf("[%s] %s  %s  (%s)", curr.Region, curr.NameZh, curr.NameEn, curr.Dial)
+		stationDesc := fmt.Sprintf("%s  %s", eqStyled, curr.Desc)
+
+		nowPlayingInfo = fmt.Sprintf("%s%s\n%s%s", lblTitle, stationTitle, lblDesc, stationDesc)
 	}
 
 	if m.statusMsg != "" {
-		nowPlayingInfo += "\n  " + lipgloss.NewStyle().Foreground(colorYellow).Render("Notice: "+m.statusMsg)
+		lblNotice := lipgloss.NewStyle().Foreground(colorYellow).Render(padWidth("  Notice:", 13))
+		nowPlayingInfo += "\n" + lblNotice + lipgloss.NewStyle().Foreground(colorYellow).Render(m.statusMsg)
 	}
 
 	playerCard := nowPlayingBox.Width(m.width - 4).Render(nowPlayingInfo)
@@ -664,7 +775,7 @@ func (m Model) View() string {
 		"[Space] Play/Stop • [f] Favorite/Unfav • [1/2] Switch Tab • [↑/↓, j/k] Navigate • [q] Quit",
 	)
 
-	// Assemble full layout
+	// Assemble layout
 	body := lipgloss.JoinVertical(
 		lipgloss.Left,
 		header,
@@ -682,7 +793,7 @@ func (m Model) View() string {
 }
 
 // -----------------------------------------------------------------------------
-// Favorites Persistence (~/.config/rthk-radio/favorites.json)
+// Favorites Persistence
 // -----------------------------------------------------------------------------
 
 func getFavFilePath() string {
@@ -719,7 +830,6 @@ func main() {
 	m := initialModel()
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
-	// Initialize MPRIS2 session bus integration
 	mpris := startMPRIS(p)
 	m.mpris = mpris
 
@@ -728,6 +838,5 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Terminate any running audio sub-processes on exit
 	m.audio.Stop()
 }
