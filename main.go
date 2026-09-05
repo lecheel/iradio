@@ -23,13 +23,13 @@ import (
 
 // Station represents a broadcast channel.
 type Station struct {
-	ID        string
-	Region    string // "HK" or "TW"
-	NameZh    string
-	NameEn    string
-	Dial      string
-	Desc      string
-	StreamURL string
+	ID        string `json:"id"`
+	Region    string `json:"region"`
+	NameZh    string `json:"name_zh"`
+	NameEn    string `json:"name_en"`
+	Dial      string `json:"dial"`
+	Desc      string `json:"desc"`
+	StreamURL string `json:"stream_url"`
 }
 
 var allStations = []Station{
@@ -634,6 +634,114 @@ func (m *Model) getAndResetCount() int {
 	return c
 }
 
+func (m *Model) jumpNextCountry() {
+	stations := allStations
+	if m.activeTab == 1 {
+		stations = m.getFavoritesList()
+	}
+	if len(stations) == 0 {
+		return
+	}
+
+	curIdx := m.cursor
+	if m.activeTab == 1 {
+		curIdx = m.favCursor
+	}
+	if curIdx < 0 || curIdx >= len(stations) {
+		curIdx = 0
+	}
+
+	currentRegion := stations[curIdx].Region
+	targetIdx := -1
+
+	// Look forward for the first station of the next region
+	for i := curIdx + 1; i < len(stations); i++ {
+		if stations[i].Region != currentRegion {
+			targetIdx = i
+			break
+		}
+	}
+
+	// Wrap around from the start if needed
+	if targetIdx == -1 {
+		for i := 0; i < curIdx; i++ {
+			if stations[i].Region != currentRegion {
+				targetIdx = i
+				break
+			}
+		}
+	}
+
+	if targetIdx != -1 {
+		if m.activeTab == 0 {
+			m.cursor = targetIdx
+		} else {
+			m.favCursor = targetIdx
+		}
+		m.clampOffsets()
+	}
+}
+
+func (m *Model) jumpPrevCountry() {
+	stations := allStations
+	if m.activeTab == 1 {
+		stations = m.getFavoritesList()
+	}
+	if len(stations) == 0 {
+		return
+	}
+
+	curIdx := m.cursor
+	if m.activeTab == 1 {
+		curIdx = m.favCursor
+	}
+	if curIdx < 0 || curIdx >= len(stations) {
+		curIdx = 0
+	}
+
+	currentRegion := stations[curIdx].Region
+
+	// 1. Walk backward to find any item belonging to a previous region
+	prevRegionIdx := -1
+	for i := curIdx - 1; i >= 0; i-- {
+		if stations[i].Region != currentRegion {
+			prevRegionIdx = i
+			break
+		}
+	}
+	if prevRegionIdx == -1 {
+		// Wrap around from the end
+		for i := len(stations) - 1; i > curIdx; i-- {
+			if stations[i].Region != currentRegion {
+				prevRegionIdx = i
+				break
+			}
+		}
+	}
+
+	if prevRegionIdx == -1 {
+		return
+	}
+
+	// 2. Find the very first station of that target region
+	targetRegion := stations[prevRegionIdx].Region
+	targetIdx := prevRegionIdx
+	for i := prevRegionIdx; i >= 0; i-- {
+		if stations[i].Region == targetRegion {
+			targetIdx = i
+		} else {
+			break
+		}
+	}
+
+	if m.activeTab == 0 {
+		m.cursor = targetIdx
+	} else {
+		m.favCursor = targetIdx
+	}
+	m.clampOffsets()
+}
+
 func (m Model) getListHeight() int {
 	h := m.height - 16
 	if h < 3 {
@@ -651,6 +759,12 @@ func (m *Model) clampOffsets() {
 
 func initialModel() Model {
 	favs := loadFavorites()
+	customCount := initCustomStations()
+	status := ""
+	if customCount > 0 {
+		status = fmt.Sprintf("Loaded %d custom station(s) from config", customCount)
+	}
+
 	return Model{
 		activeTab:    0,
 		cursor:       0,
@@ -661,6 +775,7 @@ func initialModel() Model {
 		audio:        &AudioPlayer{},
 		playingIdx:   -1,
 		isPlaying:    false,
+		statusMsg:    status,
 		bars:         make([]int, 14),
 		countBuffer:  "",
 		pendingTabID: 0,
@@ -783,6 +898,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.clampOffsets()
+
+		case "J":
+			m.pendingTabID++
+			count := m.getAndResetCount()
+			for i := 0; i < count; i++ {
+				m.jumpNextCountry()
+			}
+
+		case "K":
+			m.pendingTabID++
+			count := m.getAndResetCount()
+			for i := 0; i < count; i++ {
+				m.jumpPrevCountry()
+			}
 
 		case "H":
 			m.pendingTabID++
@@ -938,7 +1067,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.clampOffsets()
 			}
 
-		case " ":
+		case " ", "enter":
 			m.pendingTabID++
 			m.countBuffer = ""
 			m.togglePlay()
@@ -1220,8 +1349,17 @@ func (m Model) View() string {
 					regionTag = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("[SG] ")
 				case "MY":
 					regionTag = lipgloss.NewStyle().Foreground(colorPeach).Bold(true).Render("[MY] ")
-				default:
+				case "HK":
 					regionTag = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("[HK] ")
+				default:
+					r := st.Region
+					if r == "" {
+						r = "USER"
+					}
+					if len(r) > 4 {
+						r = r[:4]
+					}
+					regionTag = lipgloss.NewStyle().Foreground(colorYellow).Bold(true).Render(fmt.Sprintf("[%s] ", padWidth(r, 2)))
 				}
 
 				// Exact original column widths preserving alignment
@@ -1271,7 +1409,7 @@ func (m Model) View() string {
 		cardLine2 = lblDesc + fmt.Sprintf("%s  %s", eqStyled, fitWidth(curr.Desc, descAvail))
 	} else {
 		cardLine1 = lblTitle + lipgloss.NewStyle().Foreground(colorSubtext).Render("Stopped")
-		cardLine2 = lblDesc + lipgloss.NewStyle().Foreground(colorSubtext).Render("Select a station and press [Space] to play")
+		cardLine2 = lblDesc + lipgloss.NewStyle().Foreground(colorSubtext).Render("Select a station and press [Enter/Space] to play")
 	}
 
 	if m.statusMsg != "" {
@@ -1284,7 +1422,7 @@ func (m Model) View() string {
 	playerCard := nowPlayingBox.Width(cardInnerWidth).Height(3).Render(nowPlayingInfo)
 
 	// 5. Help Footer
-	footerText := "[Space] Play/Stop • [f] Fav • [Tab] Tab • [j/k, 3j/k] Vim • [H/M/L, G/g] Jump • [q] Quit"
+	footerText := "[Enter/Space] Play/Stop • [f] Fav • [j/k] Move • [J/K] Country Jump • [Tab] Tab • [q] Quit"
 	var footer string
 	if m.countBuffer != "" {
 		countBadge := lipgloss.NewStyle().Background(colorMauve).Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(fmt.Sprintf(" Count: %s ", m.countBuffer))
@@ -1311,16 +1449,96 @@ func (m Model) View() string {
 }
 
 // -----------------------------------------------------------------------------
-// Favorites Persistence
+// Config & Stations Persistence
 // -----------------------------------------------------------------------------
 
-func getFavFilePath() string {
+func ensureConfigDir() string {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		configDir = os.Getenv("HOME")
 	}
 	dir := filepath.Join(configDir, "iradio")
 	_ = os.MkdirAll(dir, 0755)
+
+	exampleFile := filepath.Join(dir, "stations.example.json")
+	if _, err := os.Stat(exampleFile); os.IsNotExist(err) {
+		exampleContent := `[
+  {
+    "id": "MYSTATION",
+    "region": "TW",
+    "name_zh": "自訂電台範例",
+    "name_en": "My Custom Station",
+    "dial": "Online",
+    "desc": "Custom stream description",
+    "stream_url": "https://example.com/stream.m3u8"
+  }
+]
+`
+		_ = os.WriteFile(exampleFile, []byte(exampleContent), 0644)
+	}
+	return dir
+}
+
+func loadCustomStations() []Station {
+	dir := ensureConfigDir()
+	candidates := []string{
+		filepath.Join(dir, "stations.json"),
+		filepath.Join(dir, "custom_stations.json"),
+	}
+
+	var loaded []Station
+	for _, p := range candidates {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var list []Station
+		if err := json.Unmarshal(data, &list); err == nil && len(list) > 0 {
+			loaded = append(loaded, list...)
+		}
+	}
+	return loaded
+}
+
+func initCustomStations() int {
+	custom := loadCustomStations()
+	if len(custom) == 0 {
+		return 0
+	}
+
+	idxMap := make(map[string]int)
+	for i, s := range allStations {
+		idxMap[s.ID] = i
+	}
+
+	for i, s := range custom {
+		if s.StreamURL == "" {
+			continue
+		}
+		if s.ID == "" {
+			s.ID = fmt.Sprintf("CUST%d", i+1)
+		}
+		if s.Region == "" {
+			s.Region = "USER"
+		}
+		if s.NameZh == "" && s.NameEn != "" {
+			s.NameZh = s.NameEn
+		} else if s.NameEn == "" && s.NameZh != "" {
+			s.NameEn = s.NameZh
+		}
+
+		if idx, exists := idxMap[s.ID]; exists {
+			allStations[idx] = s
+		} else {
+			allStations = append(allStations, s)
+			idxMap[s.ID] = len(allStations) - 1
+		}
+	}
+	return len(custom)
+}
+
+func getFavFilePath() string {
+	dir := ensureConfigDir()
 	return filepath.Join(dir, "favorites.json")
 }
 
