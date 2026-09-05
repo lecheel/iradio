@@ -168,6 +168,44 @@ var allStations = []Station{
 		Desc:      "Taiwan Pop Culture, Lifestyle & Talk",
 		StreamURL: "https://stream.rcs.revma.com/aw9uqyxy2tzuv",
 	},
+
+	// --- Japan (Shonan Beach, OTTAVA, FM Setagaya, AnimeNfo) ---
+	{
+		ID:        "SBFM",
+		Region:    "JP",
+		NameZh:    "湘南ビーチFM",
+		NameEn:    "Shonan Beach FM",
+		Dial:      "FM 78.9 MHz (Kanagawa)",
+		Desc:      "Jazz, City Pop, Oldies & Coastal Vibes (Hayama/Zushi)",
+		StreamURL: "https://shonanbeachfm.out.airtime.pro:8000/shonanbeachfm_a",
+	},
+	{
+		ID:        "OTV",
+		Region:    "JP",
+		NameZh:    "OTTAVA 經典音樂台",
+		NameEn:    "OTTAVA Classic Radio",
+		Dial:      "Online (Tokyo)",
+		Desc:      "Japan's Premier Classical Music & Arts Broadcast",
+		StreamURL: "https://ottava2.out.airtime.pro/ottava2_a",
+	},
+	{
+		ID:        "FMS834",
+		Region:    "JP",
+		NameZh:    "エフエム世田谷",
+		NameEn:    "FM Setagaya 83.4",
+		Dial:      "FM 83.4 MHz (Tokyo)",
+		Desc:      "Tokyo Community Broadcast, News, Culture & Pop",
+		StreamURL: "https://fmsetagaya834.out.airtime.pro/fmsetagaya834_a",
+	},
+	{
+		ID:        "ANIFO",
+		Region:    "JP",
+		NameZh:    "AnimeNfo 動畫音樂台",
+		NameEn:    "AnimeNfo Radio",
+		Dial:      "Online / Tokyo",
+		Desc:      "24/7 Anime OSTs, J-Pop, Vocaloid & Game Music",
+		StreamURL: "https://stream.animenfo.com:8000/live",
+	},
 }
 
 // -----------------------------------------------------------------------------
@@ -360,6 +398,8 @@ func (m *MPRISService) Update(status string, s *Station) {
 		broadcaster := "RTHK 香港電台"
 		if s.Region == "TW" {
 			broadcaster = s.NameZh + " (Taiwan)"
+		} else if s.Region == "JP" {
+			broadcaster = s.NameZh + " (Japan)"
 		}
 		meta["xesam:artist"] = dbus.MakeVariant([]string{broadcaster})
 		meta["xesam:album"] = dbus.MakeVariant(s.Dial)
@@ -608,6 +648,7 @@ func (m *Model) selectPrevStation() {
 // -----------------------------------------------------------------------------
 
 var (
+	colorPink    = lipgloss.Color("#F38BA8")
 	colorMauve   = lipgloss.Color("#CBA6F7")
 	colorGreen   = lipgloss.Color("#A6E3A1")
 	colorYellow  = lipgloss.Color("#F9E2AF")
@@ -663,7 +704,7 @@ func (m Model) View() string {
 	// 1. Header
 	header := lipgloss.JoinHorizontal(
 		lipgloss.Center,
-		titleStyle.Render("📻 INTERNET RADIO (HK & TAIWAN)"),
+		titleStyle.Render("📻 INTERNET RADIO (HK • TW • JP)"),
 		lipgloss.NewStyle().Foreground(colorSubtext).Render(" • MPRIS2 Enabled"),
 	)
 
@@ -719,9 +760,12 @@ func (m Model) View() string {
 
 			// Region tag
 			var regionTag string
-			if st.Region == "TW" {
+			switch st.Region {
+			case "TW":
 				regionTag = lipgloss.NewStyle().Foreground(colorCyan).Bold(true).Render("[TW] ")
-			} else {
+			case "JP":
+				regionTag = lipgloss.NewStyle().Foreground(colorPink).Bold(true).Render("[JP] ")
+			default:
 				regionTag = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("[HK] ")
 			}
 
