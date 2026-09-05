@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -522,6 +523,18 @@ func maxInt(a, b int) int {
 	return b
 }
 
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+type tabSwitchTimeoutMsg struct {
+	id  int
+	tab int
+}
+
 func clampOffset(cursor, offset, count, visibleHeight int) int {
 	if visibleHeight <= 0 || count == 0 {
 		return 0
@@ -542,20 +555,34 @@ func clampOffset(cursor, offset, count, visibleHeight int) int {
 }
 
 type Model struct {
-	width      int
-	height     int
-	activeTab  int // 0 = Stations, 1 = Favorites
-	cursor     int
-	favCursor  int
-	offset     int
-	favOffset  int
-	favorites  map[string]bool
-	audio      *AudioPlayer
-	mpris      *MPRISService
-	playingIdx int // index in allStations, or -1 if stopped
-	isPlaying  bool
-	statusMsg  string
-	bars       []int
+	width        int
+	height       int
+	activeTab    int // 0 = Stations, 1 = Favorites
+	cursor       int
+	favCursor    int
+	offset       int
+	favOffset    int
+	favorites    map[string]bool
+	audio        *AudioPlayer
+	mpris        *MPRISService
+	playingIdx   int // index in allStations, or -1 if stopped
+	isPlaying    bool
+	statusMsg    string
+	bars         []int
+	countBuffer  string
+	pendingTabID int
+}
+
+func (m *Model) getAndResetCount() int {
+	if m.countBuffer == "" {
+		return 1
+	}
+	c, err := strconv.Atoi(m.countBuffer)
+	m.countBuffer = ""
+	if err != nil || c < 1 {
+		return 1
+	}
+	return c
 }
 
 func (m Model) getListHeight() int {
@@ -576,16 +603,18 @@ func (m *Model) clampOffsets() {
 func initialModel() Model {
 	favs := loadFavorites()
 	return Model{
-		activeTab:  0,
-		cursor:     0,
-		favCursor:  0,
-		offset:     0,
-		favOffset:  0,
-		favorites:  favs,
-		audio:      &AudioPlayer{},
-		playingIdx: -1,
-		isPlaying:  false,
-		bars:       make([]int, 14),
+		activeTab:    0,
+		cursor:       0,
+		favCursor:    0,
+		offset:       0,
+		favOffset:    0,
+		favorites:    favs,
+		audio:        &AudioPlayer{},
+		playingIdx:   -1,
+		isPlaying:    false,
+		bars:         make([]int, 14),
+		countBuffer:  "",
+		pendingTabID: 0,
 	}
 }
 
@@ -632,6 +661,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectPrevStation()
 		}
 
+	case tabSwitchTimeoutMsg:
+		if msg.id == m.pendingTabID && (m.countBuffer == "1" || m.countBuffer == "2") {
+			m.activeTab = msg.tab
+			m.countBuffer = ""
+			m.clampOffsets()
+		}
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -641,44 +677,133 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 
-		case "1":
-			m.activeTab = 0
-			m.clampOffsets()
+		case "esc":
+			m.pendingTabID++
+			m.countBuffer = ""
 
-		case "2":
-			m.activeTab = 1
-			m.clampOffsets()
+		case "1", "2":
+			if m.countBuffer == "" {
+				m.countBuffer = msg.String()
+				m.pendingTabID++
+				id := m.pendingTabID
+				tabIdx := 0
+				if msg.String() == "2" {
+					tabIdx = 1
+				}
+				cmds = append(cmds, tea.Tick(260*time.Millisecond, func(t time.Time) tea.Msg {
+					return tabSwitchTimeoutMsg{id: id, tab: tabIdx}
+				}))
+			} else {
+				m.countBuffer += msg.String()
+			}
+
+		case "3", "4", "5", "6", "7", "8", "9":
+			m.pendingTabID++
+			m.countBuffer += msg.String()
+
+		case "0":
+			if m.countBuffer != "" {
+				m.countBuffer += "0"
+			}
 
 		case "tab":
+			m.pendingTabID++
+			m.countBuffer = ""
 			m.activeTab = (m.activeTab + 1) % 2
 			m.clampOffsets()
 
 		case "up", "k":
+			m.pendingTabID++
+			count := m.getAndResetCount()
 			if m.activeTab == 0 {
-				if m.cursor > 0 {
-					m.cursor--
-				}
+				m.cursor = maxInt(0, m.cursor-count)
 			} else {
-				if m.favCursor > 0 {
-					m.favCursor--
-				}
+				m.favCursor = maxInt(0, m.favCursor-count)
 			}
 			m.clampOffsets()
 
 		case "down", "j":
+			m.pendingTabID++
+			count := m.getAndResetCount()
 			if m.activeTab == 0 {
-				if m.cursor < len(allStations)-1 {
-					m.cursor++
-				}
+				m.cursor = minInt(len(allStations)-1, m.cursor+count)
 			} else {
 				favs := m.getFavoritesList()
-				if len(favs) > 0 && m.favCursor < len(favs)-1 {
-					m.favCursor++
+				if len(favs) > 0 {
+					m.favCursor = minInt(len(favs)-1, m.favCursor+count)
 				}
 			}
 			m.clampOffsets()
 
+		case "H":
+			m.pendingTabID++
+			m.countBuffer = ""
+			if m.activeTab == 0 {
+				m.cursor = minInt(len(allStations)-1, m.offset)
+			} else {
+				favs := m.getFavoritesList()
+				if len(favs) > 0 {
+					m.favCursor = minInt(len(favs)-1, m.favOffset)
+				}
+			}
+			m.clampOffsets()
+
+		case "M":
+			m.pendingTabID++
+			m.countBuffer = ""
+			listH := m.getListHeight()
+			if m.activeTab == 0 {
+				m.cursor = minInt(len(allStations)-1, m.offset+listH/2)
+			} else {
+				favs := m.getFavoritesList()
+				if len(favs) > 0 {
+					m.favCursor = minInt(len(favs)-1, m.favOffset+listH/2)
+				}
+			}
+			m.clampOffsets()
+
+		case "L":
+			m.pendingTabID++
+			m.countBuffer = ""
+			listH := m.getListHeight()
+			if m.activeTab == 0 {
+				m.cursor = minInt(len(allStations)-1, m.offset+listH-1)
+			} else {
+				favs := m.getFavoritesList()
+				if len(favs) > 0 {
+					m.favCursor = minInt(len(favs)-1, m.favOffset+listH-1)
+				}
+			}
+			m.clampOffsets()
+
+		case "ctrl+d":
+			m.pendingTabID++
+			m.countBuffer = ""
+			half := maxInt(1, m.getListHeight()/2)
+			if m.activeTab == 0 {
+				m.cursor = minInt(len(allStations)-1, m.cursor+half)
+			} else {
+				favs := m.getFavoritesList()
+				if len(favs) > 0 {
+					m.favCursor = minInt(len(favs)-1, m.favCursor+half)
+				}
+			}
+			m.clampOffsets()
+
+		case "ctrl+u":
+			m.pendingTabID++
+			m.countBuffer = ""
+			half := maxInt(1, m.getListHeight()/2)
+			if m.activeTab == 0 {
+				m.cursor = maxInt(0, m.cursor-half)
+			} else {
+				m.favCursor = maxInt(0, m.favCursor-half)
+			}
+			m.clampOffsets()
+
 		case "pgup":
+			m.pendingTabID++
+			m.countBuffer = ""
 			listH := m.getListHeight()
 			if m.activeTab == 0 {
 				m.cursor = maxInt(0, m.cursor-listH)
@@ -688,6 +813,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampOffsets()
 
 		case "pgdown":
+			m.pendingTabID++
+			m.countBuffer = ""
 			listH := m.getListHeight()
 			if m.activeTab == 0 {
 				m.cursor = minInt(len(allStations)-1, m.cursor+listH)
@@ -700,23 +827,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampOffsets()
 
 		case "home", "g":
-			if m.activeTab == 0 {
-				m.cursor = 0
+			m.pendingTabID++
+			if m.countBuffer != "" {
+				targetLine := m.getAndResetCount() - 1
+				if m.activeTab == 0 {
+					m.cursor = minInt(len(allStations)-1, maxInt(0, targetLine))
+				} else {
+					favs := m.getFavoritesList()
+					if len(favs) > 0 {
+						m.favCursor = minInt(len(favs)-1, maxInt(0, targetLine))
+					}
+				}
 			} else {
-				m.favCursor = 0
+				if m.activeTab == 0 {
+					m.cursor = 0
+				} else {
+					m.favCursor = 0
+				}
 			}
 			m.clampOffsets()
 
 		case "end", "G":
-			if m.activeTab == 0 {
-				m.cursor = maxInt(0, len(allStations)-1)
+			m.pendingTabID++
+			if m.countBuffer != "" {
+				targetLine := m.getAndResetCount() - 1
+				if m.activeTab == 0 {
+					m.cursor = minInt(len(allStations)-1, maxInt(0, targetLine))
+				} else {
+					favs := m.getFavoritesList()
+					if len(favs) > 0 {
+						m.favCursor = minInt(len(favs)-1, maxInt(0, targetLine))
+					}
+				}
 			} else {
-				favs := m.getFavoritesList()
-				m.favCursor = maxInt(0, len(favs)-1)
+				if m.activeTab == 0 {
+					m.cursor = maxInt(0, len(allStations)-1)
+				} else {
+					favs := m.getFavoritesList()
+					m.favCursor = maxInt(0, len(favs)-1)
+				}
 			}
 			m.clampOffsets()
 
 		case "f":
+			m.pendingTabID++
+			m.countBuffer = ""
 			target := m.getCurrentStation()
 			if target != nil {
 				if m.favorites[target.ID] {
@@ -735,6 +890,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case " ":
+			m.pendingTabID++
+			m.countBuffer = ""
 			m.togglePlay()
 		}
 	}
@@ -983,9 +1140,12 @@ func (m Model) View() string {
 				isSelected := (itemIdx == activeCursor)
 				isThisPlaying := (m.isPlaying && m.playingIdx >= 0 && allStations[m.playingIdx].ID == st.ID)
 
-				cursorMarker := "  "
+				relDist := absInt(itemIdx - activeCursor)
+				var relMarker string
 				if isSelected {
-					cursorMarker = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("❯ ")
+					relMarker = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render(fmt.Sprintf("❯%2d ", relDist))
+				} else {
+					relMarker = lipgloss.NewStyle().Foreground(colorSubtext).Render(fmt.Sprintf(" %2d ", relDist))
 				}
 
 				favStar := "  "
@@ -1029,7 +1189,7 @@ func (m Model) View() string {
 				}
 
 				rowText := textStyle.Render(fmt.Sprintf("%s %s %s", idCol, zhCol, enCol))
-				line := fmt.Sprintf("%s%s%s %s%s %s", cursorMarker, favStar, playBadge, regionTag, rowText, dialCol)
+				line := fmt.Sprintf("%s%s%s %s%s %s", relMarker, favStar, playBadge, regionTag, rowText, dialCol)
 				listLines = append(listLines, line)
 			} else {
 				listLines = append(listLines, "")
@@ -1075,9 +1235,14 @@ func (m Model) View() string {
 	playerCard := nowPlayingBox.Width(cardInnerWidth).Height(3).Render(nowPlayingInfo)
 
 	// 5. Help Footer
-	footer := helpStyle.Render(
-		"[Space] Play/Stop • [f] Fav • [1/2] Tab • [↑/↓, j/k] Navigate • [PgUp/PgDn] Page • [q] Quit",
-	)
+	footerText := "[Space] Play/Stop • [f] Fav • [Tab] Tab • [j/k, 3j/k] Vim • [H/M/L, G/g] Jump • [q] Quit"
+	var footer string
+	if m.countBuffer != "" {
+		countBadge := lipgloss.NewStyle().Background(colorMauve).Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(fmt.Sprintf(" Count: %s ", m.countBuffer))
+		footer = lipgloss.JoinHorizontal(lipgloss.Center, countBadge, "  ", helpStyle.Render(footerText))
+	} else {
+		footer = helpStyle.Render(footerText)
+	}
 
 	// Assemble layout to fill the exact full-screen window
 	body := lipgloss.JoinVertical(
