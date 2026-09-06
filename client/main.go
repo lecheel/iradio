@@ -14,6 +14,43 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// -----------------------------------------------------------------------------
+// UI Styling & Helpers (Matched from original main.go)
+// -----------------------------------------------------------------------------
+
+var (
+	colorPink    = lipgloss.Color("#F38BA8")
+	colorMauve   = lipgloss.Color("#CBA6F7")
+	colorGreen   = lipgloss.Color("#A6E3A1")
+	colorYellow  = lipgloss.Color("#F9E2AF")
+	colorPeach   = lipgloss.Color("#FAB387")
+	colorCyan    = lipgloss.Color("#89DCEB")
+	colorSubtext = lipgloss.Color("#A6ADC8")
+
+	titleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(colorMauve).
+			Padding(0, 1)
+
+	nowPlayingBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorGreen).
+			Padding(0, 1)
+
+	helpStyle = lipgloss.NewStyle().
+			Foreground(colorSubtext).
+			Italic(true)
+)
+
+func padWidth(s string, width int) string {
+	w := lipgloss.Width(s)
+	if w >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-w)
+}
+
 type Station struct {
 	ID        string `json:"id"`
 	Region    string `json:"region"`
@@ -62,13 +99,28 @@ type statusInfo struct {
 }
 
 type model struct {
-	cursor  int
-	status  statusInfo
-	message string
+	cursor    int
+	status    statusInfo
+	message   string
+	favorites map[string]bool
 }
 
 func initialModel() model {
-	return model{}
+	return model{
+		favorites: loadFavorites(),
+	}
+}
+
+// loadFavorites reads the favorites synced by the main iradio app
+func loadFavorites() map[string]bool {
+	favs := make(map[string]bool)
+	usr, _ := user.Current()
+	configDir := filepath.Join(usr.HomeDir, ".config", "iradio")
+	data, err := os.ReadFile(filepath.Join(configDir, "favorites.json"))
+	if err == nil {
+		json.Unmarshal(data, &favs)
+	}
+	return favs
 }
 
 func (m model) Init() tea.Cmd {
@@ -124,45 +176,92 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var b strings.Builder
 
-	// Styles
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F38BA8"))
-	selStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#89DCEB"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#A6ADC8"))
-	statusStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1"))
+	b.WriteString(titleStyle.Render("📻 IRADIO REMOTE CLIENT") + " " +
+		lipgloss.NewStyle().Foreground(colorSubtext).Render(" • Connected via playerctl"))
+	b.WriteString("\n\n")
 
-	b.WriteString(titleStyle.Render("📻 IRADIO REMOTE CLIENT") + "\n\n")
+	if len(allStations) == 0 {
+		b.WriteString(lipgloss.NewStyle().Foreground(colorSubtext).Render("No stations found. Run the main 'iradio' app first to generate the list.\n\n"))
+	}
 
 	// Station List
 	for i, st := range allStations {
 		cursor := "  "
 		if m.cursor == i {
-			cursor = selStyle.Render("❯ ")
+			cursor = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("❯ ")
 		}
 
-		region := dimStyle.Render(fmt.Sprintf("[%-2s]", st.Region))
-		name := fmt.Sprintf("%-25s", st.NameEn)
-		dial := dimStyle.Render(st.Dial)
+		favStar := "  "
+		if m.favorites[st.ID] {
+			favStar = lipgloss.NewStyle().Foreground(colorYellow).Render("★ ")
+		} else {
+			favStar = lipgloss.NewStyle().Foreground(colorSubtext).Render("☆ ")
+		}
 
-		b.WriteString(fmt.Sprintf("%s %s %s %s\n", cursor, region, name, dial))
+		playBadge := "       "
+		isPlaying := m.status.status == "Playing" && (st.NameZh+" ("+st.NameEn+")") == m.status.title
+		if isPlaying {
+			playBadge = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("▶ PLAY ")
+		}
+
+		var regionTag string
+		switch st.Region {
+		case "TW":
+			regionTag = lipgloss.NewStyle().Foreground(colorCyan).Bold(true).Render("[TW] ")
+		case "JP":
+			regionTag = lipgloss.NewStyle().Foreground(colorPink).Bold(true).Render("[JP] ")
+		case "SG":
+			regionTag = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("[SG] ")
+		case "MY":
+			regionTag = lipgloss.NewStyle().Foreground(colorPeach).Bold(true).Render("[MY] ")
+		case "HK":
+			regionTag = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("[HK] ")
+		default:
+			regionTag = lipgloss.NewStyle().Foreground(colorYellow).Bold(true).Render(fmt.Sprintf("[%s] ", padWidth(st.Region, 2)))
+		}
+
+		idCol := padWidth(st.ID, 6)
+		zhCol := padWidth(st.NameZh, 22)
+		enCol := padWidth(st.NameEn, 28)
+		dialCol := lipgloss.NewStyle().Foreground(colorSubtext).Render(fmt.Sprintf("(%s)", st.Dial))
+
+		var textStyle lipgloss.Style
+		if m.cursor == i {
+			textStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF"))
+		} else {
+			textStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4"))
+		}
+
+		rowText := textStyle.Render(fmt.Sprintf("%s %s %s", idCol, zhCol, enCol))
+		line := fmt.Sprintf("%s%s%s%s%s %s", cursor, favStar, playBadge, regionTag, rowText, dialCol)
+		b.WriteString(line + "\n")
 	}
 
-	b.WriteString("\n" + strings.Repeat("─", 50) + "\n")
+	b.WriteString("\n")
 
-	// Status Panel
+	// Now Playing Card
+	var cardLine1, cardLine2 string
+	lblTitle := lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render(padWidth("▶ Title:", 12))
+	lblNotice := lipgloss.NewStyle().Foreground(colorYellow).Render(padWidth("  Notice:", 12))
+
 	if m.status.err != nil {
-		b.WriteString(fmt.Sprintf("Error: %v\n", m.status.err))
-		b.WriteString(dimStyle.Render("Is the main iradio app running?\n"))
+		cardLine1 = lblTitle + lipgloss.NewStyle().Foreground(colorSubtext).Render("Disconnected")
+		cardLine2 = lblNotice + lipgloss.NewStyle().Foreground(colorSubtext).Render("Is the main iradio app running?")
 	} else {
-		b.WriteString(fmt.Sprintf("Status: %s\n", statusStyle.Render(m.status.status)))
-		b.WriteString(fmt.Sprintf("Title:  %s\n", m.status.title))
+		cardLine1 = lblTitle + lipgloss.NewStyle().Bold(true).Render(m.status.title)
+		cardLine2 = lblNotice + lipgloss.NewStyle().Foreground(colorYellow).Render(m.message)
 	}
 
-	// Message or Controls
-	if m.message != "" {
-		b.WriteString(fmt.Sprintf("\n%s\n", dimStyle.Render(m.message)))
-	} else {
-		b.WriteString(dimStyle.Render("\n[Enter/Space] Play • [p] Pause • [n/b] Next/Prev • [q] Quit\n"))
-	}
+	nowPlayingInfo := fmt.Sprintf("%s\n%s\n", cardLine1, cardLine2)
+	// Dynamic width based on content
+	maxW := 60
+	playerCard := nowPlayingBox.Width(maxW).Height(2).Render(nowPlayingInfo)
+	b.WriteString(playerCard)
+	b.WriteString("\n\n")
+
+	// Footer
+	footerText := "[Enter/Space] Play • [p] Pause • [n/b] Next/Prev • [s] Stop • [q] Quit"
+	b.WriteString(helpStyle.Render(footerText) + "\n")
 
 	return b.String()
 }
