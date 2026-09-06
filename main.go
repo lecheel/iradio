@@ -398,6 +398,7 @@ func (p *AudioPlayer) Stop() {
 
 type MPRISActionMsg struct {
 	Action string
+	URL    string
 }
 
 type mprisRoot struct {
@@ -460,7 +461,12 @@ func (m *mprisPlayer) Play() *dbus.Error {
 
 func (m *mprisPlayer) Seek(offset int64) *dbus.Error                              { return nil }
 func (m *mprisPlayer) SetPosition(trackId dbus.ObjectPath, pos int64) *dbus.Error { return nil }
-func (m *mprisPlayer) OpenUri(uri string) *dbus.Error                             { return nil }
+func (m *mprisPlayer) OpenUri(uri string) *dbus.Error {
+	if m.prog != nil {
+		m.prog.Send(MPRISActionMsg{Action: "open", URL: uri})
+	}
+	return nil
+}
 
 type MPRISService struct {
 	conn       *dbus.Conn
@@ -474,7 +480,7 @@ func startMPRIS(p *tea.Program) *MPRISService {
 		return &MPRISService{active: false}
 	}
 
-	reply, err := conn.RequestName("org.mpris.MediaPlayer2.rthk", dbus.NameFlagDoNotQueue)
+	reply, err := conn.RequestName("org.mpris.MediaPlayer2.iradio", dbus.NameFlagDoNotQueue)
 	if err != nil || reply != dbus.RequestNameReplyPrimaryOwner {
 		return &MPRISService{active: false}
 	}
@@ -604,9 +610,13 @@ type Model struct {
 	activeTab    int // 0 = Stations, 1 = Favorites
 	cursor       int
 	favCursor    int
+	hiddenCursor int
 	offset       int
 	favOffset    int
+	hiddenOffset int
 	favorites    map[string]bool
+	hidden       map[string]bool
+	showHidden   bool
 	audio        *AudioPlayer
 	mpris        *MPRISService
 	playingIdx   int // index in allStations, or -1 if stopped
@@ -630,19 +640,73 @@ func (m *Model) getAndResetCount() int {
 	return c
 }
 
-func (m *Model) jumpNextCountry() {
-	stations := allStations
-	if m.activeTab == 1 {
-		stations = m.getFavoritesList()
+func (m Model) getVisibleAllStations() []Station {
+	var list []Station
+	for _, st := range allStations {
+		if !m.hidden[st.ID] {
+			list = append(list, st)
+		}
 	}
+	return list
+}
+
+func (m Model) getHiddenList() []Station {
+	var list []Station
+	for _, st := range allStations {
+		if m.hidden[st.ID] {
+			list = append(list, st)
+		}
+	}
+	return list
+}
+
+func (m Model) getActiveStations() []Station {
+	if m.showHidden {
+		return m.getHiddenList()
+	}
+	if m.activeTab == 0 {
+		return m.getVisibleAllStations()
+	}
+	return m.getFavoritesList()
+}
+
+func (m *Model) getActiveCursor() int {
+	if m.showHidden {
+		return m.hiddenCursor
+	}
+	if m.activeTab == 0 {
+		return m.cursor
+	}
+	return m.favCursor
+}
+
+func (m *Model) setActiveCursor(c int) {
+	if m.showHidden {
+		m.hiddenCursor = c
+	} else if m.activeTab == 0 {
+		m.cursor = c
+	} else {
+		m.favCursor = c
+	}
+}
+
+func (m *Model) getActiveOffset() int {
+	if m.showHidden {
+		return m.hiddenOffset
+	}
+	if m.activeTab == 0 {
+		return m.offset
+	}
+	return m.favOffset
+}
+
+func (m *Model) jumpNextCountry() {
+	stations := m.getActiveStations()
 	if len(stations) == 0 {
 		return
 	}
 
-	curIdx := m.cursor
-	if m.activeTab == 1 {
-		curIdx = m.favCursor
-	}
+	curIdx := m.getActiveCursor()
 	if curIdx < 0 || curIdx >= len(stations) {
 		curIdx = 0
 	}
@@ -669,28 +733,18 @@ func (m *Model) jumpNextCountry() {
 	}
 
 	if targetIdx != -1 {
-		if m.activeTab == 0 {
-			m.cursor = targetIdx
-		} else {
-			m.favCursor = targetIdx
-		}
+		m.setActiveCursor(targetIdx)
 		m.clampOffsets()
 	}
 }
 
 func (m *Model) jumpPrevCountry() {
-	stations := allStations
-	if m.activeTab == 1 {
-		stations = m.getFavoritesList()
-	}
+	stations := m.getActiveStations()
 	if len(stations) == 0 {
 		return
 	}
 
-	curIdx := m.cursor
-	if m.activeTab == 1 {
-		curIdx = m.favCursor
-	}
+	curIdx := m.getActiveCursor()
 	if curIdx < 0 || curIdx >= len(stations) {
 		curIdx = 0
 	}
@@ -730,12 +784,10 @@ func (m *Model) jumpPrevCountry() {
 		}
 	}
 
-	if m.activeTab == 0 {
-		m.cursor = targetIdx
-	} else {
-		m.favCursor = targetIdx
+	if targetIdx != -1 {
+		m.setActiveCursor(targetIdx)
+		m.clampOffsets()
 	}
-	m.clampOffsets()
 }
 
 func (m Model) getListHeight() int {
@@ -748,13 +800,28 @@ func (m Model) getListHeight() int {
 
 func (m *Model) clampOffsets() {
 	listH := m.getListHeight()
-	m.offset = clampOffset(m.cursor, m.offset, len(allStations), listH)
+	allVisible := m.getVisibleAllStations()
+	if len(allVisible) > 0 && m.cursor >= len(allVisible) {
+		m.cursor = len(allVisible) - 1
+	}
+	m.offset = clampOffset(m.cursor, m.offset, len(allVisible), listH)
+
 	favs := m.getFavoritesList()
+	if len(favs) > 0 && m.favCursor >= len(favs) {
+		m.favCursor = len(favs) - 1
+	}
 	m.favOffset = clampOffset(m.favCursor, m.favOffset, len(favs), listH)
+
+	hiddenList := m.getHiddenList()
+	if len(hiddenList) > 0 && m.hiddenCursor >= len(hiddenList) {
+		m.hiddenCursor = len(hiddenList) - 1
+	}
+	m.hiddenOffset = clampOffset(m.hiddenCursor, m.hiddenOffset, len(hiddenList), listH)
 }
 
 func initialModel() Model {
 	favs := loadFavorites()
+	hidden := loadHidden()
 	customCount := initCustomStations()
 	status := ""
 	if customCount > 0 {
@@ -765,9 +832,13 @@ func initialModel() Model {
 		activeTab:    0,
 		cursor:       0,
 		favCursor:    0,
+		hiddenCursor: 0,
 		offset:       0,
 		favOffset:    0,
+		hiddenOffset: 0,
 		favorites:    favs,
+		hidden:       hidden,
+		showHidden:   false,
 		audio:        &AudioPlayer{},
 		playingIdx:   -1,
 		isPlaying:    false,
@@ -820,6 +891,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectNextStation()
 		case "previous":
 			m.selectPrevStation()
+		case "open":
+			if msg.URL != "" {
+				for idx, s := range allStations {
+					if s.StreamURL == msg.URL {
+						m.playingIdx = idx
+						err := m.audio.Play(s.StreamURL)
+						if err != nil {
+							m.statusMsg = fmt.Sprintf("Audio Error: %v", err)
+							m.isPlaying = false
+						} else {
+							m.isPlaying = true
+							m.statusMsg = fmt.Sprintf("Playing live: [%s] %s", s.Region, s.NameEn)
+							if m.mpris != nil {
+								m.mpris.Update("Playing", &allStations[idx])
+							}
+						}
+						break
+					}
+				}
+			}
 		}
 
 	case tea.KeyMsg:
@@ -848,16 +939,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.pendingTabID++
 			m.countBuffer = ""
+			if m.showHidden {
+				m.showHidden = false
+				m.statusMsg = ""
+				m.clampOffsets()
+			}
 
 		case "f1":
 			m.pendingTabID++
 			m.countBuffer = ""
+			m.showHidden = false
 			m.activeTab = 0
 			m.clampOffsets()
 
 		case "f2":
 			m.pendingTabID++
 			m.countBuffer = ""
+			m.showHidden = false
 			m.activeTab = 1
 			m.clampOffsets()
 
@@ -873,29 +971,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.pendingTabID++
 			m.countBuffer = ""
-			m.activeTab = (m.activeTab + 1) % 2
+			if m.showHidden {
+				m.showHidden = false
+			} else {
+				m.activeTab = (m.activeTab + 1) % 2
+			}
 			m.clampOffsets()
 
 		case "up", "k":
 			m.pendingTabID++
 			count := m.getAndResetCount()
-			if m.activeTab == 0 {
-				m.cursor = maxInt(0, m.cursor-count)
-			} else {
-				m.favCursor = maxInt(0, m.favCursor-count)
-			}
+			c := m.getActiveCursor()
+			m.setActiveCursor(maxInt(0, c-count))
 			m.clampOffsets()
 
 		case "down", "j":
 			m.pendingTabID++
 			count := m.getAndResetCount()
-			if m.activeTab == 0 {
-				m.cursor = minInt(len(allStations)-1, m.cursor+count)
-			} else {
-				favs := m.getFavoritesList()
-				if len(favs) > 0 {
-					m.favCursor = minInt(len(favs)-1, m.favCursor+count)
-				}
+			c := m.getActiveCursor()
+			total := len(m.getActiveStations())
+			if total > 0 {
+				m.setActiveCursor(minInt(total-1, c+count))
 			}
 			m.clampOffsets()
 
@@ -916,13 +1012,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "H":
 			m.pendingTabID++
 			m.countBuffer = ""
-			if m.activeTab == 0 {
-				m.cursor = minInt(len(allStations)-1, m.offset)
+			m.showHidden = !m.showHidden
+			if m.showHidden {
+				m.statusMsg = "Viewing hidden stations. Press 'd' to restore, 'H' to exit"
 			} else {
-				favs := m.getFavoritesList()
-				if len(favs) > 0 {
-					m.favCursor = minInt(len(favs)-1, m.favOffset)
-				}
+				m.statusMsg = ""
 			}
 			m.clampOffsets()
 
@@ -930,13 +1024,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingTabID++
 			m.countBuffer = ""
 			listH := m.getListHeight()
-			if m.activeTab == 0 {
-				m.cursor = minInt(len(allStations)-1, m.offset+listH/2)
-			} else {
-				favs := m.getFavoritesList()
-				if len(favs) > 0 {
-					m.favCursor = minInt(len(favs)-1, m.favOffset+listH/2)
-				}
+			off := m.getActiveOffset()
+			total := len(m.getActiveStations())
+			if total > 0 {
+				m.setActiveCursor(minInt(total-1, off+listH/2))
 			}
 			m.clampOffsets()
 
@@ -944,13 +1035,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingTabID++
 			m.countBuffer = ""
 			listH := m.getListHeight()
-			if m.activeTab == 0 {
-				m.cursor = minInt(len(allStations)-1, m.offset+listH-1)
-			} else {
-				favs := m.getFavoritesList()
-				if len(favs) > 0 {
-					m.favCursor = minInt(len(favs)-1, m.favOffset+listH-1)
-				}
+			off := m.getActiveOffset()
+			total := len(m.getActiveStations())
+			if total > 0 {
+				m.setActiveCursor(minInt(total-1, off+listH-1))
 			}
 			m.clampOffsets()
 
@@ -958,13 +1046,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingTabID++
 			m.countBuffer = ""
 			half := maxInt(1, m.getListHeight()/2)
-			if m.activeTab == 0 {
-				m.cursor = minInt(len(allStations)-1, m.cursor+half)
-			} else {
-				favs := m.getFavoritesList()
-				if len(favs) > 0 {
-					m.favCursor = minInt(len(favs)-1, m.favCursor+half)
-				}
+			c := m.getActiveCursor()
+			total := len(m.getActiveStations())
+			if total > 0 {
+				m.setActiveCursor(minInt(total-1, c+half))
 			}
 			m.clampOffsets()
 
@@ -972,80 +1057,84 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingTabID++
 			m.countBuffer = ""
 			half := maxInt(1, m.getListHeight()/2)
-			if m.activeTab == 0 {
-				m.cursor = maxInt(0, m.cursor-half)
-			} else {
-				m.favCursor = maxInt(0, m.favCursor-half)
-			}
+			c := m.getActiveCursor()
+			m.setActiveCursor(maxInt(0, c-half))
 			m.clampOffsets()
 
 		case "pgup":
 			m.pendingTabID++
 			m.countBuffer = ""
 			listH := m.getListHeight()
-			if m.activeTab == 0 {
-				m.cursor = maxInt(0, m.cursor-listH)
-			} else {
-				m.favCursor = maxInt(0, m.favCursor-listH)
-			}
+			c := m.getActiveCursor()
+			m.setActiveCursor(maxInt(0, c-listH))
 			m.clampOffsets()
 
 		case "pgdown":
 			m.pendingTabID++
 			m.countBuffer = ""
 			listH := m.getListHeight()
-			if m.activeTab == 0 {
-				m.cursor = minInt(len(allStations)-1, m.cursor+listH)
-			} else {
-				favs := m.getFavoritesList()
-				if len(favs) > 0 {
-					m.favCursor = minInt(len(favs)-1, m.favCursor+listH)
-				}
+			c := m.getActiveCursor()
+			total := len(m.getActiveStations())
+			if total > 0 {
+				m.setActiveCursor(minInt(total-1, c+listH))
 			}
 			m.clampOffsets()
 
 		case "home", "g":
 			m.pendingTabID++
+			total := len(m.getActiveStations())
 			if m.countBuffer != "" {
 				targetLine := m.getAndResetCount() - 1
-				if m.activeTab == 0 {
-					m.cursor = minInt(len(allStations)-1, maxInt(0, targetLine))
-				} else {
-					favs := m.getFavoritesList()
-					if len(favs) > 0 {
-						m.favCursor = minInt(len(favs)-1, maxInt(0, targetLine))
-					}
+				if total > 0 {
+					m.setActiveCursor(minInt(total-1, maxInt(0, targetLine)))
 				}
 			} else {
-				if m.activeTab == 0 {
-					m.cursor = 0
-				} else {
-					m.favCursor = 0
-				}
+				m.setActiveCursor(0)
 			}
 			m.clampOffsets()
 
 		case "end", "G":
 			m.pendingTabID++
+			total := len(m.getActiveStations())
 			if m.countBuffer != "" {
 				targetLine := m.getAndResetCount() - 1
-				if m.activeTab == 0 {
-					m.cursor = minInt(len(allStations)-1, maxInt(0, targetLine))
-				} else {
-					favs := m.getFavoritesList()
-					if len(favs) > 0 {
-						m.favCursor = minInt(len(favs)-1, maxInt(0, targetLine))
-					}
+				if total > 0 {
+					m.setActiveCursor(minInt(total-1, maxInt(0, targetLine)))
 				}
 			} else {
-				if m.activeTab == 0 {
-					m.cursor = maxInt(0, len(allStations)-1)
+				if total > 0 {
+					m.setActiveCursor(total - 1)
 				} else {
-					favs := m.getFavoritesList()
-					m.favCursor = maxInt(0, len(favs)-1)
+					m.setActiveCursor(0)
 				}
 			}
 			m.clampOffsets()
+
+		case "d":
+			m.pendingTabID++
+			m.countBuffer = ""
+			target := m.getCurrentStation()
+			if target != nil {
+				if m.showHidden || m.hidden[target.ID] {
+					delete(m.hidden, target.ID)
+					saveHidden(m.hidden)
+					m.statusMsg = fmt.Sprintf("Restored %s to station list", target.NameEn)
+					m.clampOffsets()
+				} else {
+					m.hidden[target.ID] = true
+					saveHidden(m.hidden)
+					m.statusMsg = fmt.Sprintf("Hidden station: %s (Press 'H' to view hidden)", target.NameEn)
+					if m.isPlaying && m.playingIdx >= 0 && allStations[m.playingIdx].ID == target.ID {
+						m.audio.Stop()
+						m.isPlaying = false
+						m.playingIdx = -1
+						if m.mpris != nil {
+							m.mpris.Update("Stopped", nil)
+						}
+					}
+					m.clampOffsets()
+				}
+			}
 
 		case "f":
 			m.pendingTabID++
@@ -1078,23 +1167,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) getCurrentStation() *Station {
-	if m.activeTab == 0 {
-		if m.cursor >= 0 && m.cursor < len(allStations) {
-			return &allStations[m.cursor]
-		}
-	} else {
-		favs := m.getFavoritesList()
-		if len(favs) > 0 && m.favCursor < len(favs) {
-			return &favs[m.favCursor]
-		}
+	stations := m.getActiveStations()
+	c := m.getActiveCursor()
+	if c >= 0 && c < len(stations) {
+		return &stations[c]
 	}
 	return nil
 }
 
-func (m *Model) getFavoritesList() []Station {
+func (m Model) getFavoritesList() []Station {
 	var list []Station
 	for _, st := range allStations {
-		if m.favorites[st.ID] {
+		if m.favorites[st.ID] && !m.hidden[st.ID] {
 			list = append(list, st)
 		}
 	}
@@ -1141,11 +1225,27 @@ func (m *Model) togglePlay() {
 }
 
 func (m *Model) selectNextStation() {
-	if len(allStations) == 0 {
+	stations := m.getActiveStations()
+	if len(stations) == 0 {
 		return
 	}
-	m.playingIdx = (m.playingIdx + 1) % len(allStations)
-	st := &allStations[m.playingIdx]
+	curr := -1
+	if m.playingIdx >= 0 && m.playingIdx < len(allStations) {
+		for i, st := range stations {
+			if st.ID == allStations[m.playingIdx].ID {
+				curr = i
+				break
+			}
+		}
+	}
+	nextIdx := (curr + 1) % len(stations)
+	st := &stations[nextIdx]
+	for idx, s := range allStations {
+		if s.ID == st.ID {
+			m.playingIdx = idx
+			break
+		}
+	}
 	_ = m.audio.Play(st.StreamURL)
 	m.isPlaying = true
 	if m.mpris != nil {
@@ -1154,11 +1254,27 @@ func (m *Model) selectNextStation() {
 }
 
 func (m *Model) selectPrevStation() {
-	if len(allStations) == 0 {
+	stations := m.getActiveStations()
+	if len(stations) == 0 {
 		return
 	}
-	m.playingIdx = (m.playingIdx - 1 + len(allStations)) % len(allStations)
-	st := &allStations[m.playingIdx]
+	curr := -1
+	if m.playingIdx >= 0 && m.playingIdx < len(allStations) {
+		for i, st := range stations {
+			if st.ID == allStations[m.playingIdx].ID {
+				curr = i
+				break
+			}
+		}
+	}
+	prevIdx := (curr - 1 + len(stations)) % len(stations)
+	st := &stations[prevIdx]
+	for idx, s := range allStations {
+		if s.ID == st.ID {
+			m.playingIdx = idx
+			break
+		}
+	}
 	_ = m.audio.Play(st.StreamURL)
 	m.isPlaying = true
 	if m.mpris != nil {
@@ -1367,13 +1483,15 @@ func (m Model) renderHelpBox() string {
 		sectionStyle.Render("── Navigation & Vim Motions ────────────────────────"),
 		row("j / k, ↓ / ↑", "Move down / up (supports [count]j, e.g. 3j)"),
 		row("J / K", "Jump to Next / Previous country section"),
-		row("H / M / L", "Jump to Top / Middle / Bottom of screen"),
+		row("M / L", "Jump to Middle / Bottom of screen"),
 		row("Ctrl+d / Ctrl+u", "Half page down / up (PgDn / PgUp)"),
 		row("gg / G", "Jump to First / Last station"),
 		"",
 		sectionStyle.Render("── Controls & Playback ─────────────────────────────"),
 		row("Enter / Space", "Play / Stop selected station"),
 		row("f", "Toggle station in/out of Favorites"),
+		row("d", "Hide non-working station / change back (unhide)"),
+		row("H", "Toggle viewing hidden stations"),
 		row("Tab  (or F1 / F2)", "Switch between All Stations and Favorites"),
 		row("? / Esc", "Toggle / close this Help popup"),
 		row("q / Ctrl+c", "Quit iradio"),
@@ -1406,51 +1524,63 @@ func (m Model) renderMainView() string {
 	)
 
 	// 2. Tabs
-	favsList := m.getFavoritesList()
-	favCount := len(favsList)
-
-	var tab1, tab2 string
-	if m.activeTab == 0 {
-		tab1 = activeTabStyle.Render(fmt.Sprintf("1: All Stations (%d/%d) [F1]", m.cursor+1, len(allStations)))
-		tab2 = inactiveTabStyle.Render(fmt.Sprintf("2: Favorites (%d) [F2]", favCount))
-	} else {
-		currentFavPos := 0
-		if favCount > 0 {
-			currentFavPos = m.favCursor + 1
-		}
-		tab1 = inactiveTabStyle.Render(fmt.Sprintf("1: All Stations (%d) [F1]", len(allStations)))
-		tab2 = activeTabStyle.Render(fmt.Sprintf("2: Favorites (%d/%d) [F2]", currentFavPos, favCount))
-	}
-
-	var stationsToRender []Station
-	activeCursor := m.cursor
-	currentOffset := m.offset
-
-	if m.activeTab == 0 {
-		stationsToRender = allStations
-		currentOffset = clampOffset(m.cursor, m.offset, len(allStations), listHeight)
-	} else {
-		stationsToRender = favsList
-		activeCursor = m.favCursor
-		currentOffset = clampOffset(m.favCursor, m.favOffset, favCount, listHeight)
-	}
-
+	var tabsRow string
+	stationsToRender := m.getActiveStations()
+	activeCursor := m.getActiveCursor()
+	currentOffset := m.getActiveOffset()
 	totalItems := len(stationsToRender)
-	scrollInfo := ""
-	if totalItems > listHeight {
-		endIdx := minInt(totalItems, currentOffset+listHeight)
-		scrollInfo = lipgloss.NewStyle().Foreground(colorSubtext).Render(
-			fmt.Sprintf("  [Showing %d-%d of %d]", currentOffset+1, endIdx, totalItems),
-		)
+
+	if m.showHidden {
+		hiddenTab := activeTabStyle.Render(fmt.Sprintf("👁 Hidden Stations (%d) [H/Esc to exit]", totalItems))
+		tabsRow = lipgloss.JoinHorizontal(lipgloss.Center, hiddenTab)
+	} else {
+		visibleAll := m.getVisibleAllStations()
+		favsList := m.getFavoritesList()
+		favCount := len(favsList)
+
+		var tab1, tab2 string
+		if m.activeTab == 0 {
+			tab1 = activeTabStyle.Render(fmt.Sprintf("1: All Stations (%d/%d) [F1]", m.cursor+1, len(visibleAll)))
+			tab2 = inactiveTabStyle.Render(fmt.Sprintf("2: Favorites (%d) [F2]", favCount))
+		} else {
+			currentFavPos := 0
+			if favCount > 0 {
+				currentFavPos = m.favCursor + 1
+			}
+			tab1 = inactiveTabStyle.Render(fmt.Sprintf("1: All Stations (%d) [F1]", len(visibleAll)))
+			tab2 = activeTabStyle.Render(fmt.Sprintf("2: Favorites (%d/%d) [F2]", currentFavPos, favCount))
+		}
+
+		hiddenBadge := ""
+		if len(m.hidden) > 0 {
+			hiddenBadge = lipgloss.NewStyle().Foreground(colorSubtext).Render(fmt.Sprintf("  [%d hidden • 'H' to view]", len(m.hidden)))
+		}
+
+		scrollInfo := ""
+		if totalItems > listHeight {
+			endIdx := minInt(totalItems, currentOffset+listHeight)
+			scrollInfo = lipgloss.NewStyle().Foreground(colorSubtext).Render(
+				fmt.Sprintf("  [Showing %d-%d of %d]", currentOffset+1, endIdx, totalItems),
+			)
+		}
+		tabsRow = lipgloss.JoinHorizontal(lipgloss.Center, tab1, " ", tab2, hiddenBadge, scrollInfo)
 	}
-	tabsRow := lipgloss.JoinHorizontal(lipgloss.Center, tab1, " ", tab2, scrollInfo)
 
 	// 3. Station List (Strictly budgeted to listHeight lines for full-screen view)
 	var listLines []string
 
 	if totalItems == 0 {
-		msg1 := lipgloss.NewStyle().Foreground(colorSubtext).Render("  No favorite stations added yet.")
-		msg2 := lipgloss.NewStyle().Foreground(colorSubtext).Render("  Press 'f' on any station in Tab 1 to add.")
+		var msg1, msg2 string
+		if m.showHidden {
+			msg1 = lipgloss.NewStyle().Foreground(colorSubtext).Render("  No hidden stations.")
+			msg2 = lipgloss.NewStyle().Foreground(colorSubtext).Render("  Press 'd' on any station in normal view to hide non-working stations.")
+		} else if m.activeTab == 1 {
+			msg1 = lipgloss.NewStyle().Foreground(colorSubtext).Render("  No favorite stations added yet.")
+			msg2 = lipgloss.NewStyle().Foreground(colorSubtext).Render("  Press 'f' on any station in Tab 1 to add.")
+		} else {
+			msg1 = lipgloss.NewStyle().Foreground(colorSubtext).Render("  All stations are currently hidden.")
+			msg2 = lipgloss.NewStyle().Foreground(colorSubtext).Render("  Press 'H' to view hidden stations and 'd' to change back.")
+		}
 		listLines = append(listLines, msg1, msg2)
 		for len(listLines) < listHeight {
 			listLines = append(listLines, "")
@@ -1481,6 +1611,11 @@ func (m Model) renderMainView() string {
 				playBadge := "       "
 				if isThisPlaying {
 					playBadge = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("▶ PLAY ")
+				}
+
+				hiddenTag := ""
+				if m.showHidden {
+					hiddenTag = lipgloss.NewStyle().Foreground(colorPeach).Bold(true).Render("[HIDDEN] ")
 				}
 
 				// Region tag
@@ -1521,7 +1656,7 @@ func (m Model) renderMainView() string {
 				}
 
 				rowText := textStyle.Render(fmt.Sprintf("%s %s %s", idCol, zhCol, enCol))
-				line := fmt.Sprintf("%s%s%s %s%s %s", relMarker, favStar, playBadge, regionTag, rowText, dialCol)
+				line := fmt.Sprintf("%s%s%s %s%s%s %s", relMarker, favStar, playBadge, hiddenTag, regionTag, rowText, dialCol)
 				listLines = append(listLines, line)
 			} else {
 				listLines = append(listLines, "")
@@ -1567,7 +1702,13 @@ func (m Model) renderMainView() string {
 	playerCard := nowPlayingBox.Width(cardInnerWidth).Height(3).Render(nowPlayingInfo)
 
 	// 5. Help Footer
-	footerText := "[Enter/Space] Play • [f] Fav • [j/k] Move • [J/K] Country • [Tab] Tab • [?] Help • [q] Quit"
+	var footerText string
+	if m.showHidden {
+		footerText = "[Enter/Space] Play • [d] Change Back (Unhide) • [H/Esc] Exit Hidden • [?] Help • [q] Quit"
+	} else {
+		footerText = "[Enter/Space] Play • [f] Fav • [d] Hide • [H] Hidden • [j/k] Move • [Tab] Tab • [?] Help • [q] Quit"
+	}
+
 	var footer string
 	if m.countBuffer != "" {
 		countBadge := lipgloss.NewStyle().Background(colorMauve).Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(fmt.Sprintf(" Count: %s ", m.countBuffer))
@@ -1720,6 +1861,27 @@ func saveFavorites(favs map[string]bool) {
 	data, err := json.MarshalIndent(favs, "", "  ")
 	if err == nil {
 		_ = os.WriteFile(getFavFilePath(), data, 0644)
+	}
+}
+
+func getHiddenFilePath() string {
+	dir := ensureConfigDir()
+	return filepath.Join(dir, "hidden.json")
+}
+
+func loadHidden() map[string]bool {
+	hidden := make(map[string]bool)
+	data, err := os.ReadFile(getHiddenFilePath())
+	if err == nil {
+		_ = json.Unmarshal(data, &hidden)
+	}
+	return hidden
+}
+
+func saveHidden(hidden map[string]bool) {
+	data, err := json.MarshalIndent(hidden, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(getHiddenFilePath(), data, 0644)
 	}
 }
 
