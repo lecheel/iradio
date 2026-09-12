@@ -2210,44 +2210,66 @@ func (m Model) renderMainView() string {
 	return lipgloss.NewStyle().Padding(1, 2).Render(body)
 }
 
-func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight int) string {
-	boxBorder := lipgloss.Border{
-		Top:         "─",
-		Bottom:      "─",
-		Left:        "│",
-		Right:       "│",
-		TopLeft:     "┌",
-		TopRight:    "┐",
-		BottomLeft:  "└",
-		BottomRight: "┘",
+// titledPanel renders a rounded-border box with the title embedded into the
+// top-left of the border, mimicking a labeled frame.
+func titledPanel(title, content string, width, height int, borderColor lipgloss.Color) string {
+	st := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Width(width)
+	if height > 0 {
+		st = st.Height(height)
 	}
+	box := st.Render(content)
+	if title == "" {
+		return box
+	}
+	lines := strings.Split(box, "\n")
+	if len(lines) == 0 {
+		return box
+	}
+	total := lipgloss.Width(lines[0])
+	titleStr := " " + title + " "
+	tw := lipgloss.Width(titleStr)
+	fill := total - 3 - tw
+	if fill < 0 {
+		fill = 0
+	}
+	bStyle := lipgloss.NewStyle().Foreground(borderColor)
+	tStyle := lipgloss.NewStyle().Foreground(borderColor).Bold(true)
+	lines[0] = bStyle.Render("╭─") + tStyle.Render(titleStr) + bStyle.Render(strings.Repeat("─", fill)+"╮")
+	return strings.Join(lines, "\n")
+}
 
+func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight int) string {
 	// 1. Top Panel: Terminal Music Player
 	playerState := "stopped"
 	if m.isPlaying && m.isMusic {
 		playerState = "playing"
 	}
-	topTitle := lipgloss.NewStyle().Foreground(colorCyan).Bold(true).Render("Terminal Music Player")
 	topContent := fmt.Sprintf("State: %s • Volume: %s [System (ALSA)]", playerState, m.volumeStr)
-	topBox := lipgloss.NewStyle().
-		Border(boxBorder).
-		BorderForeground(colorCyan).
-		Width(contentWidth).
-		Render(fmt.Sprintf("%s\n%s", topTitle, topContent))
+	// Content width inside the box must be contentWidth-2 so the boxed output
+	// (content + 2 border chars) fits exactly into contentWidth columns.
+	topBox := titledPanel("Terminal Music Player", topContent, contentWidth-2, 0, colorCyan)
 
-	// Layout Widths
-	leftWidth := (contentWidth * 48) / 100
-	if leftWidth < 32 {
-		leftWidth = 32
+	// Layout Widths. The two side-by-side boxes plus a single space separator
+	// must fit inside contentWidth. Each box consumes (innerWidth + 2) columns
+	// because of its left and right border glyphs.
+	innerWidth := contentWidth - 5
+	if innerWidth < 40 {
+		innerWidth = 40
 	}
-	rightWidth := contentWidth - leftWidth - 2
-	if rightWidth < 25 {
-		rightWidth = 25
+	leftWidth := (innerWidth * 48) / 100
+	if leftWidth < 28 {
+		leftWidth = 28
+	}
+	rightWidth := innerWidth - leftWidth
+	if rightWidth < 24 {
+		rightWidth = 24
 	}
 
 	// 2. Left Panel: Library
 	var libLines []string
-	libLines = append(libLines, lipgloss.NewStyle().Foreground(colorYellow).Bold(true).Render("Library"))
 	totalTracks := len(m.musicTracks)
 
 	if totalTracks == 0 {
@@ -2257,7 +2279,7 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 			libLines = append(libLines, "")
 		}
 	} else {
-		for row := 0; row < listHeight-1; row++ {
+		for row := 0; row < listHeight; row++ {
 			idx := m.musicOffset + row
 			if idx < totalTracks {
 				t := m.musicTracks[idx]
@@ -2294,12 +2316,7 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 			}
 		}
 	}
-	libraryBox := lipgloss.NewStyle().
-		Border(boxBorder).
-		BorderForeground(colorYellow).
-		Width(leftWidth).
-		Height(listHeight).
-		Render(strings.Join(libLines, "\n"))
+	libraryBox := titledPanel("Library", strings.Join(libLines, "\n"), leftWidth, listHeight, colorYellow)
 
 	// 3. Right Panels
 	var curTrack MusicTrack
@@ -2311,7 +2328,6 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 
 	// 3a. Now Box
 	var nowLines []string
-	nowLines = append(nowLines, lipgloss.NewStyle().Foreground(colorCyan).Bold(true).Render("Now"))
 	if totalTracks > 0 {
 		labelStyle := lipgloss.NewStyle().Foreground(colorMauve).Bold(true)
 		valStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4"))
@@ -2328,15 +2344,10 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	} else {
 		nowLines = append(nowLines, lipgloss.NewStyle().Foreground(colorSubtext).Render("No track loaded"))
 	}
-	nowBox := lipgloss.NewStyle().
-		Border(boxBorder).
-		BorderForeground(colorCyan).
-		Width(rightWidth).
-		Render(strings.Join(nowLines, "\n"))
+	nowBox := titledPanel("Now", strings.Join(nowLines, "\n"), rightWidth, 4, colorCyan)
 
 	// 3b. Progress Box
 	var progLines []string
-	progLines = append(progLines, lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("Progress"))
 	elapsedSecs := int(m.trackElapsed.Seconds())
 	totalSecs := int(curTrack.Duration.Seconds())
 	if !m.isPlaying || !m.isMusic {
@@ -2370,15 +2381,14 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	progLine := fmt.Sprintf("%s   %s", progStyled, lipgloss.NewStyle().Foreground(colorSubtext).Render(timeText))
 	progLines = append(progLines, progLine)
 
-	progressBox := lipgloss.NewStyle().
-		Border(boxBorder).
-		BorderForeground(colorGreen).
-		Width(rightWidth).
-		Render(strings.Join(progLines, "\n"))
+	progressBox := titledPanel("Progress", strings.Join(progLines, "\n"), rightWidth, 1, colorGreen)
 
-	// 3c. Lyrics Box
+	// 3c. Lyrics Box — title line + exactly 3 lyric lines (previous, current, next)
+	const maxLyricLines = 3
 	var lyrLines []string
-	lyrLines = append(lyrLines, lipgloss.NewStyle().Foreground(colorCyan).Bold(true).Render("Lyrics"))
+	titleLine := lipgloss.NewStyle().Foreground(colorYellow).Bold(true).Render(fitWidth(curTrack.Filename, rightWidth-4))
+	lyrLines = append(lyrLines, titleLine)
+
 	if len(curTrack.Lyrics) > 0 && m.isPlaying && m.isMusic {
 		activeIdx := 0
 		for i, line := range curTrack.Lyrics {
@@ -2388,25 +2398,44 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 				break
 			}
 		}
-		titleLine := lipgloss.NewStyle().Foreground(colorYellow).Bold(true).Render(fitWidth(curTrack.Filename, rightWidth-4))
-		activeLine := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(fitWidth(curTrack.Lyrics[activeIdx].Text, rightWidth-4))
-		lyrLines = append(lyrLines, titleLine, activeLine)
+		start := activeIdx - 1
+		if start < 0 {
+			start = 0
+		}
+		end := start + maxLyricLines
+		if end > len(curTrack.Lyrics) {
+			end = len(curTrack.Lyrics)
+			start = end - maxLyricLines
+			if start < 0 {
+				start = 0
+			}
+		}
+		for i := start; i < end; i++ {
+			text := fitWidth(curTrack.Lyrics[i].Text, rightWidth-4)
+			if i == activeIdx {
+				lyrLines = append(lyrLines, lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(text))
+			} else {
+				lyrLines = append(lyrLines, lipgloss.NewStyle().Foreground(colorSubtext).Render(text))
+			}
+		}
 	} else {
-		titleLine := lipgloss.NewStyle().Foreground(colorYellow).Bold(true).Render(fitWidth(curTrack.Filename, rightWidth-4))
 		status := "(No synchronized .lrc file found)"
 		if len(curTrack.Lyrics) > 0 {
 			status = curTrack.Lyrics[0].Text
 		}
-		lyrLines = append(lyrLines, titleLine, lipgloss.NewStyle().Foreground(colorSubtext).Render(status))
+		lyrLines = append(lyrLines, lipgloss.NewStyle().Foreground(colorSubtext).Render(status))
 	}
 
-	lyricsBox := lipgloss.NewStyle().
-		Border(boxBorder).
-		BorderForeground(colorCyan).
-		Width(rightWidth).
-		Render(strings.Join(lyrLines, "\n"))
+	// Fixed height: 1 title line + 3 lyric lines.
+	lyrHeight := 4
+	lyricsBox := titledPanel("Lyrics", strings.Join(lyrLines, "\n"), rightWidth, lyrHeight, colorCyan)
 
+	// Pad the right column so its total height matches the library box
+	// (library renders as listHeight content lines + 2 border rows).
 	rightColumn := lipgloss.JoinVertical(lipgloss.Left, nowBox, progressBox, lyricsBox)
+	if h := lipgloss.Height(rightColumn); h < listHeight+2 {
+		rightColumn += strings.Repeat("\n", listHeight+2-h)
+	}
 	mainSplit := lipgloss.JoinHorizontal(lipgloss.Top, libraryBox, " ", rightColumn)
 
 	footerText := "[Enter/Space] Play/Pause • [f] Fav • [n/p] Next/Prev • [r] Rescan ~/Music • [Tab] Switch • [?] Help • [q] Quit"
