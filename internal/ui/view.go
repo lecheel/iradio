@@ -644,12 +644,27 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	}
 	freqLabel := "  " + lipgloss.NewStyle().Foreground(colorSubtext).Render(string(axis))
 
-	status := "◌ IDLE"
-	if m.isPlaying {
-		status = "◉ LIVE"
+	// Label the spectrum source so the user can tell at a glance whether
+	// the LED bars come from the preloaded EQ cache, a live ffmpeg FFT,
+	// or the simulated fallback.
+	var status string
+	var statusColor lipgloss.Color
+	switch m.currentSpectrumSource() {
+	case spectrumCached:
+		status = "◉ CACHED EQ"
+		statusColor = colorCyan
+	case spectrumRealtime:
+		status = "◉ LIVE FFT"
+		statusColor = colorGreen
+	case spectrumSimulated:
+		status = "◉ SIMULATED"
+		statusColor = colorPeach
+	default:
+		status = "◌ IDLE"
+		statusColor = colorSubtext
 	}
 	infoLine := "  " +
-		lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render(status) +
+		lipgloss.NewStyle().Foreground(statusColor).Bold(true).Render(status) +
 		lipgloss.NewStyle().Foreground(colorSubtext).Render(fmt.Sprintf("  Peak %d/%d", peak, barMax))
 
 	eqLines := make([]string, 0, artInner)

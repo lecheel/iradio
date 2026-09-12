@@ -60,7 +60,8 @@ type Model struct {
 	mprisSvc     *mpris.Service
 	eqDB         *eqcache.DB
 	cachedEQ     *eqcache.CachedEQ
-	playingIdx   int // index in stations.All, or -1 if stopped
+	forceLiveEQ  bool // when true, ignore the precomputed EQ cache
+	playingIdx   int  // index in stations.All, or -1 if stopped
 	isPlaying    bool
 	isMusic      bool
 	musicTracks  []music.MusicTrack
@@ -133,6 +134,11 @@ func New() *Model {
 
 // SetService attaches the MPRIS service to the model.
 func (m *Model) SetService(s *mpris.Service) { m.mprisSvc = s }
+
+// SetForceLiveEQ controls whether local track playback uses the precomputed
+// EQ cache. When true, the cache is bypassed and every track is analysed in
+// real time with the ffmpeg-driven FFT (equivalent to the --eq CLI flag).
+func (m *Model) SetForceLiveEQ(v bool) { m.forceLiveEQ = v }
 
 // Stop shuts down audio playback and reports the stopped state over MPRIS.
 func (m *Model) Stop() {
@@ -749,6 +755,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// spectrumSource describes which backend is currently driving the LED
+// equalizer bars, so the UI can label it accurately.
+type spectrumSource int
+
+const (
+	spectrumIdle      spectrumSource = iota // nothing playing
+	spectrumCached                          // precomputed frames from eqcache
+	spectrumRealtime                        // live ffmpeg -> FFT
+	spectrumSimulated                       // fallback random walk
+)
+
+func (m *Model) currentSpectrumSource() spectrumSource {
+	if !m.isPlaying {
+		return spectrumIdle
+	}
+	if m.isMusic && m.cachedEQ != nil {
+		return spectrumCached
+	}
+	if m.realSpectrum {
+		return spectrumRealtime
+	}
+	return spectrumSimulated
+}
+
 func (m *Model) getCurrentStation() *stations.Station {
 	list := m.getActiveStations()
 	c := m.getActiveCursor()
@@ -765,9 +795,11 @@ func (m *Model) playMusicTrack(idx int) {
 	t := &m.musicTracks[idx]
 
 	// Look up precomputed EQ first. If we have it, we can skip both the
-	// realtime ffmpeg FFT and the ffprobe duration probe.
+	// realtime ffmpeg FFT and the ffprobe duration probe. When --eq is in
+	// effect we deliberately ignore the cache so the LED meter reflects
+	// the file as decoded live.
 	var cached *eqcache.CachedEQ
-	if m.eqDB != nil {
+	if !m.forceLiveEQ && m.eqDB != nil {
 		cached = m.eqDB.Lookup(t.Path)
 	}
 	m.cachedEQ = cached
@@ -805,9 +837,12 @@ func (m *Model) playMusicTrack(idx int) {
 	m.playingIdx = -1
 	m.trackStart = time.Now()
 	m.trackElapsed = 0
-	if cached != nil {
+	switch {
+	case cached != nil:
 		m.statusMsg = fmt.Sprintf("Playing track (cached EQ): %s", t.Filename)
-	} else {
+	case m.forceLiveEQ:
+		m.statusMsg = fmt.Sprintf("Playing track (live EQ): %s", t.Filename)
+	default:
 		m.statusMsg = fmt.Sprintf("Playing track: %s", t.Filename)
 	}
 	if m.mprisSvc != nil {

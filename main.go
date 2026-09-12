@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -17,8 +20,11 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	args := os.Args[1:]
+	forceLiveEQ := false
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
 		case "--help", "-h", "-help", "help":
 			printUsage(os.Stdout)
 			return
@@ -26,14 +32,17 @@ func main() {
 			fmt.Printf("iradio %s\n", version)
 			return
 		case "--process_eq", "-process_eq":
-			if err := runProcessEQ(os.Args[2:]); err != nil {
+			// Consumes everything after it (optional filename filter).
+			if err := runProcessEQ(args[i+1:]); err != nil {
 				fmt.Fprintf(os.Stderr, "process_eq: %v\n", err)
 				os.Exit(1)
 			}
 			return
+		case "--eq", "-eq":
+			forceLiveEQ = true
 		default:
-			if strings.HasPrefix(os.Args[1], "-") {
-				fmt.Fprintf(os.Stderr, "iradio: unknown flag %q\n\n", os.Args[1])
+			if strings.HasPrefix(args[i], "-") {
+				fmt.Fprintf(os.Stderr, "iradio: unknown flag %q\n\n", args[i])
 				printUsage(os.Stderr)
 				os.Exit(2)
 			}
@@ -43,6 +52,7 @@ func main() {
 	config.WriteExampleStations()
 
 	m := ui.New()
+	m.SetForceLiveEQ(forceLiveEQ)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	svc := mpris.Start(p)
@@ -72,6 +82,7 @@ USAGE:
 FLAGS:
   -h, --help           Show this help message and exit
   -v, --version        Print the program version and exit
+      --eq             Force live (realtime) FFT spectrum analysis
 
 SUBCOMMANDS:
   --process_eq [FILTER]
@@ -87,6 +98,15 @@ SUBCOMMANDS:
 
         Re-running only analyzes files that are new or whose mtime/size
         changed since the last run, so it is safe to run repeatedly.
+
+EQ MODES:
+  By default, local tracks use the precomputed cache from --process_eq
+  when it is available (LED Equalizer status: "◉ CACHED EQ") and fall
+  back to a live ffmpeg FFT for uncached tracks and radio streams
+  ("◉ LIVE FFT"). Passing --eq disables the cache lookup entirely, so
+  every played track is decoded live for its spectrum ("◉ LIVE FFT"),
+  which is useful when the cache is stale, the source changes often,
+  or you simply want the analyser to reflect the file as it is now.
 
 INTERACTIVE TUI KEYBINDINGS:
   Enter / Space        Play / stop the selected station or track
@@ -111,6 +131,7 @@ FILES:
 
 EXAMPLES:
   iradio                         # launch the player
+  iradio --eq                    # launch the player, force live FFT EQ
   iradio --process_eq            # cache EQ for every track in ~/Music
   iradio --process_eq jazz       # cache EQ only for tracks matching "jazz"
 
@@ -140,38 +161,99 @@ func runProcessEQ(extra []string) error {
 		filter = strings.ToLower(extra[0])
 	}
 
-	var processed, skipped, failed int
-	for i, t := range tracks {
+	// Build the work list, pruning cached and filtered-out tracks.
+	type job struct {
+		track music.MusicTrack
+	}
+	var work []job
+	var skipped int
+	for _, t := range tracks {
 		if filter != "" && !strings.Contains(strings.ToLower(t.Filename), filter) {
 			continue
 		}
 		if db.Lookup(t.Path) != nil {
 			skipped++
-			fmt.Printf("[%d/%d] skip (cached): %s\n", i+1, len(tracks), t.Filename)
 			continue
 		}
-		fmt.Printf("[%d/%d] analyzing: %s\n", i+1, len(tracks), t.Filename)
-		eq, err := eqcache.Compute(t.Path)
-		if err != nil {
+		work = append(work, job{t})
+	}
+
+	if len(work) == 0 {
+		fmt.Printf("Nothing to do: %d track(s) already cached.\n", skipped)
+		return nil
+	}
+
+	// Parallelize across cores. Each worker spawns its own ffmpeg and runs
+	// the (allocation-free) FFT loop; sqlite writes are serialized back on
+	// the main goroutine.
+	workers := runtime.NumCPU()
+	if workers > len(work) {
+		workers = len(work)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	fmt.Printf("Preprocessing %d track(s) with %d worker(s) (skipped %d cached)...\n\n",
+		len(work), workers, skipped)
+
+	type result struct {
+		track music.MusicTrack
+		eq    *eqcache.CachedEQ
+		err   error
+	}
+
+	jobs := make(chan job)
+	results := make(chan result, len(work))
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				eq, err := eqcache.Compute(j.track.Path)
+				results <- result{j.track, eq, err}
+			}
+		}()
+	}
+	go func() {
+		for _, j := range work {
+			jobs <- j
+		}
+		close(jobs)
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var processed, failed int
+	completed := 0
+	start := time.Now()
+	for r := range results {
+		completed++
+		if r.err != nil {
 			failed++
-			fmt.Printf("    error: %v\n", err)
+			fmt.Printf("[%d/%d] FAILED %s: %v\n", completed, len(work), r.track.Filename, r.err)
 			continue
 		}
-		if err := db.Store(t.Path, eq); err != nil {
+		if err := db.Store(r.track.Path, r.eq); err != nil {
 			failed++
-			fmt.Printf("    store error: %v\n", err)
+			fmt.Printf("[%d/%d] store error for %s: %v\n", completed, len(work), r.track.Filename, err)
 			continue
 		}
 		processed++
 		frames := 0
-		if eq.NumBars > 0 {
-			frames = len(eq.Bars) / eq.NumBars
+		if r.eq.NumBars > 0 {
+			frames = len(r.eq.Bars) / r.eq.NumBars
 		}
-		fmt.Printf("    stored %d frames @ %d ms hop (%d bars/frame)\n",
-			frames, eq.HopMs, eq.NumBars)
+		fmt.Printf("[%d/%d] %s (%d frames @ %d ms)\n",
+			completed, len(work), r.track.Filename, frames, r.eq.HopMs)
 	}
 
-	fmt.Printf("\nDone. processed=%d skipped=%d failed=%d (total %d)\n",
+	fmt.Printf("\nDone in %s. processed=%d skipped=%d failed=%d (total %d)\n",
+		time.Since(start).Round(time.Millisecond),
 		processed, skipped, failed, len(tracks))
 	return nil
 }
