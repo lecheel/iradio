@@ -107,6 +107,11 @@ func New() *Model {
 		status = fmt.Sprintf("Scanned %d tracks from ~/Music", len(musicList))
 	}
 
+	savedTab := config.LoadInt("last_tab.json", 0)
+	if savedTab < 0 || savedTab > 2 {
+		savedTab = 0
+	}
+
 	savedEQMode := config.LoadInt("eq_mode.json", 0)
 	if savedEQMode < 0 || savedEQMode > int(EQModeCircle) {
 		savedEQMode = 0
@@ -119,9 +124,9 @@ func New() *Model {
 		status = fmt.Sprintf("EQ cache: %d track(s) ready", eqDB.Count())
 	}
 
-	return &Model{
+	m := &Model{
 		eqDB:         eqDB,
-		activeTab:    0,
+		activeTab:    savedTab,
 		cursor:       0,
 		favCursor:    0,
 		hiddenCursor: 0,
@@ -152,6 +157,8 @@ func New() *Model {
 		volumeStr:    config.SystemVolume(),
 		eqMode:       EQMode(savedEQMode),
 	}
+	m.clampOffsets()
+	return m
 }
 
 // SetService attaches the MPRIS service to the model.
@@ -525,6 +532,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.countBuffer = ""
 			m.showHidden = false
 			m.activeTab = 0
+			config.SaveInt("last_tab.json", m.activeTab)
 			m.clampOffsets()
 
 		case "f2":
@@ -532,6 +540,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.countBuffer = ""
 			m.showHidden = false
 			m.activeTab = 1
+			config.SaveInt("last_tab.json", m.activeTab)
 			m.clampOffsets()
 
 		case "f3":
@@ -539,6 +548,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.countBuffer = ""
 			m.showHidden = false
 			m.activeTab = 2
+			config.SaveInt("last_tab.json", m.activeTab)
 			m.clampOffsets()
 
 		case "r":
@@ -565,6 +575,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showHidden = false
 			} else {
 				m.activeTab = (m.activeTab + 1) % 3
+				config.SaveInt("last_tab.json", m.activeTab)
 			}
 			m.clampOffsets()
 
@@ -906,6 +917,7 @@ func (m *Model) playMusicTrack(idx int) {
 	m.isMusic = true
 	m.musicPlaying = idx
 	m.playingIdx = -1
+	config.SaveInt("last_tab.json", 2)
 	m.trackStart = time.Now()
 	m.trackElapsed = 0
 	switch {
@@ -1003,6 +1015,7 @@ func (m *Model) togglePlay() {
 	m.musicPlaying = -1
 	m.playingIdx = targetIdx
 	m.cachedEQ = nil
+	config.SaveInt("last_tab.json", m.activeTab)
 	m.statusMsg = fmt.Sprintf("Playing live: [%s] %s", target.Region, target.NameEn)
 	if m.mprisSvc != nil {
 		m.mprisSvc.Update("Playing", target)

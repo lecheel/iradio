@@ -136,7 +136,7 @@ INTERACTIVE TUI KEYBINDINGS:
 FILES:
   Config    ~/.config/iradio/   (favorites.json, hidden.json,
                                  music_favorites.json, eq_mode.json,
-                                 stations.json)
+                                 last_tab.json, stations.json)
   Cache     ~/.cache/iradio/    (eq.sqlite)
   Music     ~/Music/            (*.mp3, *.flac, *.m4a, *.wav, *.ogg,
                                  plus sidecar *.lrc lyric files)
