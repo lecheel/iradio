@@ -301,7 +301,7 @@ func (m *Model) renderMainView() string {
 		footer = helpStyle.Render(footerText)
 	}
 
-	body := lipgloss.JoinVertical(
+	topBody := lipgloss.JoinVertical(
 		lipgloss.Left,
 		header,
 		"",
@@ -310,9 +310,22 @@ func (m *Model) renderMainView() string {
 		listBlock,
 		"",
 		playerCard,
-		"",
-		footer,
 	)
+
+	// Pad the view so the footer hint lands on the row just above the very
+	// bottom of the terminal ("bot -1"). The outer style adds one line of
+	// vertical padding top and bottom, so we target a content height of
+	// m.height-2 and keep a blank spacer line right before the footer.
+	filler := m.height - lipgloss.Height(topBody) - 4
+	if filler < 0 {
+		filler = 0
+	}
+	bodyParts := []string{topBody}
+	for i := 0; i < filler; i++ {
+		bodyParts = append(bodyParts, "")
+	}
+	bodyParts = append(bodyParts, "", footer)
+	body := lipgloss.JoinVertical(lipgloss.Left, bodyParts...)
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(body)
 }
@@ -766,19 +779,37 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	}
 	mainSplit := lipgloss.JoinHorizontal(lipgloss.Top, libraryBox, " ", rightColumn)
 
-	footerText := "[Enter/Space] Play/Pause • [t] EQ Mode • [f] Fav • [n/p] Next/Prev • [F5] Layout • [r] Rescan • [Tab] Switch • [?] Help • [q] Quit"
-	footer := helpStyle.Render(footerText)
+	footerText := "[Enter/Space] Play/Pause • [t] EQ Mode • [f] Fav • [n/p] Next/Prev • [F5] Layout • [r] Rescan • [Tab] Tab • [?] Help • [q] Quit"
 
-	body := lipgloss.JoinVertical(
+	var footer string
+	if m.countBuffer != "" {
+		countBadge := lipgloss.NewStyle().Background(colorMauve).Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(fmt.Sprintf(" Count: %s ", m.countBuffer))
+		footer = lipgloss.JoinHorizontal(lipgloss.Center, countBadge, "  ", helpStyle.Render(footerText))
+	} else {
+		footer = helpStyle.Render(footerText)
+	}
+
+	topBody := lipgloss.JoinVertical(
 		lipgloss.Left,
 		header,
 		"",
 		tabsRow,
 		"",
 		mainSplit,
-		"",
-		footer,
 	)
+
+	// Match the radio tab: pad so the footer hint lands at "bot -1"
+	// (one line above the very bottom of the terminal).
+	filler := m.height - lipgloss.Height(topBody) - 4
+	if filler < 0 {
+		filler = 0
+	}
+	bodyParts := []string{topBody}
+	for i := 0; i < filler; i++ {
+		bodyParts = append(bodyParts, "")
+	}
+	bodyParts = append(bodyParts, "", footer)
+	body := lipgloss.JoinVertical(lipgloss.Left, bodyParts...)
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(body)
 }
