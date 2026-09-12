@@ -39,6 +39,15 @@ func waitForSpectrum(ch chan []int) tea.Cmd {
 	}
 }
 
+// EQMode specifies the visual style of the LED equalizer.
+type EQMode int
+
+const (
+	EQModeBar    EQMode = iota // solid vertical columns
+	EQModeDot                  // floating dots using real "•"
+	EQModeCircle               // floating round dots using "●"
+)
+
 // Model is the top-level Bubble Tea application state.
 type Model struct {
 	width        int
@@ -79,6 +88,7 @@ type Model struct {
 	showHelp     bool
 	volumeStr    string
 	realSpectrum bool
+	eqMode       EQMode
 }
 
 // New builds the initial Model, loading favorites, hidden flags and the
@@ -134,6 +144,7 @@ func New() *Model {
 		pendingTabID: 0,
 		showHelp:     false,
 		volumeStr:    config.SystemVolume(),
+		eqMode:       EQModeBar,
 	}
 }
 
@@ -718,6 +729,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.clampOffsets()
 				}
+			}
+
+		case "t":
+			m.pendingTabID++
+			m.countBuffer = ""
+			m.eqMode = (m.eqMode + 1) % 3
+			switch m.eqMode {
+			case EQModeBar:
+				m.statusMsg = "EQ Mode: Bar (solid columns)"
+			case EQModeDot:
+				m.statusMsg = "EQ Mode: Dot (floating • dots)"
+			case EQModeCircle:
+				m.statusMsg = "EQ Mode: Circle (dot matrix ●)"
 			}
 
 		case "f":

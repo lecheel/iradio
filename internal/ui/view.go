@@ -47,6 +47,7 @@ func (m Model) renderHelpBox() string {
 		row("Enter / Space", "Play / Stop selected station / track"),
 		row("n / p", "Next / Previous track or station"),
 		row("f", "Toggle station / track in Favorites"),
+		row("t", "Toggle EQ display mode (Bar / Dot / Circle)"),
 		row("d", "Hide non-working radio station / restore"),
 		row("H", "Toggle viewing hidden radio stations"),
 		row("r", "Rescan ~/Music directory for audio files"),
@@ -246,6 +247,11 @@ func (m *Model) renderMainView() string {
 	// 4. Now Playing / EQ Panel
 	var eqBar strings.Builder
 	eqChars := []string{" ", " ", "▂", "▃", "▄", "▅", "▆", "▇"}
+	if m.eqMode == EQModeDot {
+		eqChars = []string{" ", "·", "•", "•", "•", "•", "•", "•"}
+	} else if m.eqMode == EQModeCircle {
+		eqChars = []string{" ", "·", "•", "•", "●", "●", "●", "●"}
+	}
 	for _, val := range m.bars {
 		eqBar.WriteString(eqChars[val])
 	}
@@ -282,9 +288,9 @@ func (m *Model) renderMainView() string {
 	// 5. Help Footer
 	var footerText string
 	if m.showHidden {
-		footerText = "[Enter/Space] Play • [d] Change Back (Unhide) • [H/Esc] Exit Hidden • [?] Help • [q] Quit"
+		footerText = "[Enter/Space] Play • [t] EQ Mode • [d] Unhide • [H/Esc] Exit Hidden • [?] Help • [q] Quit"
 	} else {
-		footerText = "[Enter/Space] Play • [f] Fav • [d] Hide • [H] Hidden • [j/k] Move • [Tab] Tab • [?] Help • [q] Quit"
+		footerText = "[Enter/Space] Play • [t] EQ Mode • [f] Fav • [d] Hide • [H] Hidden • [Tab] Tab • [?] Help • [q] Quit"
 	}
 
 	var footer string
@@ -556,7 +562,20 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 		lipgloss.NewStyle().Foreground(colorSubtext).Bold(true).Render("R ") +
 		renderMeter(peak, colorCyan)
 
-	const dot = "▄"
+	activeGlyph := "▄"
+	offGlyph := "▄"
+	peakGlyph := "▄"
+	switch m.eqMode {
+	case EQModeDot:
+		activeGlyph = "•"
+		offGlyph = "·"
+		peakGlyph = "•"
+	case EQModeCircle:
+		activeGlyph = "●"
+		offGlyph = "·"
+		peakGlyph = "●"
+	}
+
 	peakStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
 	var spectrumLines []string
 	for row := 0; row < spectrumRows; row++ {
@@ -592,13 +611,22 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 				}
 			}
 
+			isPeak := (rowFromBottom == peakRow && peakRow >= 0)
+			var isLevel bool
+			if m.eqMode == EQModeBar {
+				isLevel = (filledHeight > rowFromBottom)
+			} else {
+				// Dot and Circle modes: light only the top segment of the current level
+				isLevel = (filledHeight > 0 && rowFromBottom == filledHeight-1)
+			}
+
 			switch {
-			case rowFromBottom == peakRow && peakRow >= filledHeight:
-				sb.WriteString(peakStyle.Render(dot))
-			case filledHeight > rowFromBottom:
-				sb.WriteString(onStyle.Render(dot))
+			case isPeak && (!isLevel || m.eqMode != EQModeBar):
+				sb.WriteString(peakStyle.Render(peakGlyph))
+			case isLevel:
+				sb.WriteString(onStyle.Render(activeGlyph))
 			default:
-				sb.WriteString(offStyle.Render(dot))
+				sb.WriteString(offStyle.Render(offGlyph))
 			}
 			if i < len(bars)-1 {
 				sb.WriteString(" ")
@@ -663,8 +691,17 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 		status = "◌ IDLE"
 		statusColor = colorSubtext
 	}
+	modeTag := "BAR"
+	switch m.eqMode {
+	case EQModeDot:
+		modeTag = "DOT"
+	case EQModeCircle:
+		modeTag = "CIRCLE"
+	}
+
 	infoLine := "  " +
 		lipgloss.NewStyle().Foreground(statusColor).Bold(true).Render(status) +
+		lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("  ["+modeTag+"]") +
 		lipgloss.NewStyle().Foreground(colorSubtext).Render(fmt.Sprintf("  Peak %d/%d", peak, barMax))
 
 	eqLines := make([]string, 0, artInner)
@@ -691,7 +728,7 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	}
 	mainSplit := lipgloss.JoinHorizontal(lipgloss.Top, libraryBox, " ", rightColumn)
 
-	footerText := "[Enter/Space] Play/Pause • [f] Fav • [n/p] Next/Prev • [r] Rescan ~/Music • [Tab] Switch • [?] Help • [q] Quit"
+	footerText := "[Enter/Space] Play/Pause • [t] EQ Mode • [f] Fav • [n/p] Next/Prev • [r] Rescan • [Tab] Switch • [?] Help • [q] Quit"
 	footer := helpStyle.Render(footerText)
 
 	body := lipgloss.JoinVertical(

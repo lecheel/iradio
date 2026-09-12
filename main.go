@@ -120,6 +120,7 @@ EQ MODES:
 
 INTERACTIVE TUI KEYBINDINGS:
   Enter / Space        Play / stop the selected station or track
+  t                    Toggle LED equalizer mode (Bar / Dot / Circle)
   n / p                Next / previous track or station
   f                    Toggle station / track in Favorites
   d                    Hide (or restore) the selected radio station
