@@ -844,7 +844,9 @@ func saveMusicFavorites(favs map[string]bool) {
 type tickMsg time.Time
 
 func tickCmd() tea.Cmd {
-	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
+	// Faster tick so the LED spectrum can interpolate smoothly instead of
+	// jumping between values every 200ms.
+	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
@@ -893,6 +895,7 @@ type Model struct {
 	width        int
 	height       int
 	activeTab    int // 0 = Stations, 1 = Favorites, 2 = Music Library
+	artFrame     int
 	cursor       int
 	favCursor    int
 	hiddenCursor int
@@ -916,6 +919,7 @@ type Model struct {
 	trackElapsed time.Duration
 	statusMsg    string
 	bars         []int
+	peaks        []float64 // QE-style peak-hold markers (bar-value space 0..6)
 	countBuffer  string
 	pendingTabID int
 	showHelp     bool
@@ -1152,7 +1156,8 @@ func initialModel() Model {
 		musicTracks:  musicList,
 		musicPlaying: -1,
 		statusMsg:    status,
-		bars:         make([]int, 14),
+		bars:         make([]int, 32),
+		peaks:        make([]float64, 32),
 		countBuffer:  "",
 		pendingTabID: 0,
 		showHelp:     false,
@@ -1175,8 +1180,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		if m.isPlaying {
+			m.artFrame++
+			// Smooth random walk so bars move gradually instead of
+			// jumping randomly every tick. Reads like a real VU meter.
 			for i := range m.bars {
-				m.bars[i] = rand.Intn(7)
+				r := rand.Intn(100)
+				switch {
+				case r < 40:
+					// hold current value
+				case r < 65:
+					m.bars[i]++
+				case r < 90:
+					m.bars[i]--
+				default:
+					// occasional larger jump
+					m.bars[i] = rand.Intn(7)
+				}
+				if m.bars[i] < 0 {
+					m.bars[i] = 0
+				} else if m.bars[i] > 6 {
+					m.bars[i] = 6
+				}
+			}
+			// QE-style peak-hold with gravity: peaks snap up instantly to
+			// match the current bar, then drift back down at a constant
+			// rate, producing the classic floating-dot effect.
+			if len(m.peaks) != len(m.bars) {
+				m.peaks = make([]float64, len(m.bars))
+			}
+			const peakGravity = 0.25 // bar-units per tick (~2s full fall)
+			for i := range m.bars {
+				cur := float64(m.bars[i])
+				if cur >= m.peaks[i] {
+					m.peaks[i] = cur
+				} else {
+					m.peaks[i] -= peakGravity
+					if m.peaks[i] < cur {
+						m.peaks[i] = cur
+					}
+				}
 			}
 			if m.isMusic && m.musicPlaying >= 0 && m.musicPlaying < len(m.musicTracks) {
 				m.trackElapsed = time.Since(m.trackStart)
@@ -1189,46 +1231,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for i := range m.bars {
 				m.bars[i] = 0
 			}
+			if len(m.peaks) != len(m.bars) {
+				m.peaks = make([]float64, len(m.bars))
+			}
+			for i := range m.peaks {
+				m.peaks[i] = 0
+			}
 		}
 		cmds = append(cmds, tickCmd())
-
-	case MPRISActionMsg:
-		switch msg.Action {
-		case "playpause":
-			m.togglePlay()
-		case "play":
-			if !m.isPlaying {
-				m.togglePlay()
-			}
-		case "pause", "stop":
-			if m.isPlaying {
-				m.togglePlay()
-			}
-		case "next":
-			m.selectNextStation()
-		case "previous":
-			m.selectPrevStation()
-		case "open":
-			if msg.URL != "" {
-				for idx, s := range allStations {
-					if s.StreamURL == msg.URL {
-						m.playingIdx = idx
-						err := m.audio.Play(s.StreamURL)
-						if err != nil {
-							m.statusMsg = fmt.Sprintf("Audio Error: %v", err)
-							m.isPlaying = false
-						} else {
-							m.isPlaying = true
-							m.statusMsg = fmt.Sprintf("Playing live: [%s] %s", s.Region, s.NameEn)
-							if m.mpris != nil {
-								m.mpris.Update("Playing", &allStations[idx])
-							}
-						}
-						break
-					}
-				}
-			}
-		}
 
 	case tea.KeyMsg:
 		if m.showHelp {
@@ -2430,44 +2440,170 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	lyrHeight := 4
 	lyricsBox := titledPanel("Lyrics", strings.Join(lyrLines, "\n"), rightWidth, lyrHeight, colorCyan)
 
-	// 3d. ASCII Art Box — fills any remaining vertical space so the right
-	// column matches the library box height (listHeight content + 2 borders).
+	// 3d. Winamp-style LED spectrum analyzer — animated when playing,
+	// dotted grid when idle. Uses the lower-half block "▄" as the LED dot
+	// so the whole thing reads as a retro dot-matrix VU rather than solid
+	// bars.
 	used := lipgloss.Height(nowBox) + lipgloss.Height(progressBox) + lipgloss.Height(lyricsBox)
 	artInner := (listHeight + 2) - used - 2
-	if artInner < 3 {
-		artInner = 3
+	if artInner < 6 {
+		artInner = 6
 	}
 
-	artPalette := []string{
-		`   .   *   .   *   .   *   .   *   .   *   .`,
-		`  *  ♪  ♫  ♪  ♫  ♪  ♫  ♪  ♫  ♪  ♫  ♪  *`,
-		`   '   .   '   .   '   .   '   .   '   .   '`,
-		`      ╔══════════════════════════════╗`,
-		`       ║   ◉  ON  AIR  •  LIVE  •  ◉  ║`,
-		`      ╚══════════════════════════════╝`,
-		`   .   '   .   '   .   '   .   '   .   '   .`,
-		`  *  ♫  ♪  ♫  ♪  ♫  ♪  ♫  ♪  ♫  ♪  ♫  *`,
-		`   '   .   '   .   '   .   '   .   '   .   '`,
-		`     ___    ___    ___    ___    ___    ___`,
-		`    |___|  |___|  |___|  |___|  |___|  |___|`,
-		`    |___|  |___|  |___|  |___|  |___|  |___|`,
-		`     (_)    (_)    (_)    (_)    (_)    (_)`,
+	// Row budget inside the box:
+	//   header   (1): stereo L/R LED meters
+	//   spectrum (N): vertical dot columns
+	//   baseline (1): ruler
+	//   labels   (1): frequency axis
+	//   info     (1): status
+	spectrumRows := artInner - 4
+	if spectrumRows < 3 {
+		spectrumRows = 3
 	}
 
-	var artContent []string
-	for i := 0; i < artInner; i++ {
-		var line string
-		if i < len(artPalette) {
-			line = artPalette[i]
-		}
-		lineW := lipgloss.Width(line)
-		pad := (rightWidth - 2 - lineW) / 2
-		if pad < 0 {
-			pad = 0
-		}
-		artContent = append(artContent, strings.Repeat(" ", pad)+line)
+	// Fit as many bars as the width allows. Each column takes 2 cells
+	// (bar + separator space) plus 2 cells of leading margin.
+	availBarCols := rightWidth - 4
+	barCount := len(m.bars)
+	if availBarCols/2 < barCount {
+		barCount = availBarCols / 2
 	}
-	artBox := titledPanel("On Air", strings.Join(artContent, "\n"), rightWidth, artInner, colorPeach)
+	if barCount < 4 {
+		barCount = 4
+	}
+	if barCount > len(m.bars) {
+		barCount = len(m.bars)
+	}
+	bars := m.bars[:barCount]
+
+	const barMax = 6
+
+	// Stereo meter stats derived from the bar values.
+	peak, sum := 0, 0
+	for _, v := range bars {
+		if v > peak {
+			peak = v
+		}
+		sum += v
+	}
+	avg := 0
+	if len(bars) > 0 {
+		avg = sum / len(bars)
+	}
+
+	meterW := (rightWidth - 14) / 2
+	if meterW < 6 {
+		meterW = 6
+	}
+	renderMeter := func(level int, c lipgloss.Color) string {
+		filled := level * meterW / barMax
+		if filled > meterW {
+			filled = meterW
+		}
+		if filled < 0 {
+			filled = 0
+		}
+		return lipgloss.NewStyle().Foreground(c).Render(strings.Repeat("█", filled)) +
+			lipgloss.NewStyle().Foreground(colorSurface).Render(strings.Repeat("░", meterW-filled))
+	}
+	stereoLine := "  " +
+		lipgloss.NewStyle().Foreground(colorSubtext).Bold(true).Render("L ") +
+		renderMeter(avg, colorGreen) + " " +
+		lipgloss.NewStyle().Foreground(colorSubtext).Bold(true).Render("R ") +
+		renderMeter(peak, colorCyan)
+
+	// Vertical dot-matrix columns. Winamp's spectrum gradient goes
+	// green at the bottom → yellow → peach → pink at the top, which we
+	// reproduce row by row so every cell in a row shares the same color.
+	const dot = "▄"
+	// Peak markers rendered as a bright white dot so the falling peak
+	// stands out against the coloured bar gradient below it.
+	peakStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
+	var spectrumLines []string
+	for row := 0; row < spectrumRows; row++ {
+		rowFromBottom := spectrumRows - 1 - row
+		ratio := 0.0
+		if spectrumRows > 1 {
+			ratio = float64(rowFromBottom) / float64(spectrumRows-1)
+		}
+		var rowColor lipgloss.Color
+		switch {
+		case ratio > 0.85:
+			rowColor = colorPink
+		case ratio > 0.60:
+			rowColor = colorPeach
+		case ratio > 0.35:
+			rowColor = colorYellow
+		default:
+			rowColor = colorGreen
+		}
+		onStyle := lipgloss.NewStyle().Foreground(rowColor)
+		offStyle := lipgloss.NewStyle().Foreground(colorSurface)
+
+		var sb strings.Builder
+		sb.WriteString("  ")
+		for i, v := range bars {
+			filledHeight := v * spectrumRows / barMax
+
+			// Position of the falling peak marker for this column in row
+			// space (0 = bottom). -1 means no marker for this column.
+			peakRow := -1
+			if i < len(m.peaks) && m.peaks[i] > 0 {
+				peakRow = int(m.peaks[i]*float64(spectrumRows)/float64(barMax) + 0.5)
+				if peakRow > spectrumRows-1 {
+					peakRow = spectrumRows - 1
+				}
+			}
+
+			switch {
+			case rowFromBottom == peakRow && peakRow >= filledHeight:
+				sb.WriteString(peakStyle.Render(dot))
+			case filledHeight > rowFromBottom:
+				sb.WriteString(onStyle.Render(dot))
+			default:
+				sb.WriteString(offStyle.Render(dot))
+			}
+			if i < len(bars)-1 {
+				sb.WriteString(" ")
+			}
+		}
+		spectrumLines = append(spectrumLines, sb.String())
+	}
+
+	// Baseline ruler + frequency axis.
+	baseW := barCount*2 - 1
+	if baseW < 1 {
+		baseW = 1
+	}
+	baseline := "  " + lipgloss.NewStyle().Foreground(colorSubtext).Render(strings.Repeat("▀", baseW))
+	freqLabel := "  " + lipgloss.NewStyle().Foreground(colorSubtext).Render("50  100 250 500  1k   2k   4k  8k  16k")
+
+	status := "◌ IDLE"
+	if m.isPlaying {
+		status = "◉ LIVE"
+	}
+	infoLine := "  " +
+		lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render(status) +
+		lipgloss.NewStyle().Foreground(colorSubtext).Render(fmt.Sprintf("  Peak %d/%d", peak, barMax))
+
+	eqLines := make([]string, 0, artInner)
+	eqLines = append(eqLines, stereoLine)
+	eqLines = append(eqLines, spectrumLines...)
+	eqLines = append(eqLines, baseline, freqLabel, infoLine)
+	for len(eqLines) < artInner {
+		eqLines = append(eqLines, "")
+	}
+	if len(eqLines) > artInner {
+		eqLines = eqLines[:artInner]
+	}
+
+	// Border color gently cycles so the whole box pulses while playing.
+	eqColor := colorPeach
+	if m.isPlaying {
+		eqColors := []lipgloss.Color{colorPeach, colorCyan, colorGreen, colorMauve}
+		eqColor = eqColors[(m.artFrame/5)%len(eqColors)]
+	}
+	artBox := titledPanel("LED Equalizer", strings.Join(eqLines, "\n"), rightWidth, artInner, eqColor)
 
 	rightColumn := lipgloss.JoinVertical(lipgloss.Left, nowBox, progressBox, lyricsBox, artBox)
 	// Safety pad: if the right column is still shorter than the library box,
