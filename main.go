@@ -2430,9 +2430,48 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	lyrHeight := 4
 	lyricsBox := titledPanel("Lyrics", strings.Join(lyrLines, "\n"), rightWidth, lyrHeight, colorCyan)
 
-	// Pad the right column so its total height matches the library box
-	// (library renders as listHeight content lines + 2 border rows).
-	rightColumn := lipgloss.JoinVertical(lipgloss.Left, nowBox, progressBox, lyricsBox)
+	// 3d. ASCII Art Box — fills any remaining vertical space so the right
+	// column matches the library box height (listHeight content + 2 borders).
+	used := lipgloss.Height(nowBox) + lipgloss.Height(progressBox) + lipgloss.Height(lyricsBox)
+	artInner := (listHeight + 2) - used - 2
+	if artInner < 3 {
+		artInner = 3
+	}
+
+	artPalette := []string{
+		`   .   *   .   *   .   *   .   *   .   *   .`,
+		`  *  ♪  ♫  ♪  ♫  ♪  ♫  ♪  ♫  ♪  ♫  ♪  *`,
+		`   '   .   '   .   '   .   '   .   '   .   '`,
+		`      ╔══════════════════════════════╗`,
+		`       ║   ◉  ON  AIR  •  LIVE  •  ◉  ║`,
+		`      ╚══════════════════════════════╝`,
+		`   .   '   .   '   .   '   .   '   .   '   .`,
+		`  *  ♫  ♪  ♫  ♪  ♫  ♪  ♫  ♪  ♫  ♪  ♫  *`,
+		`   '   .   '   .   '   .   '   .   '   .   '`,
+		`     ___    ___    ___    ___    ___    ___`,
+		`    |___|  |___|  |___|  |___|  |___|  |___|`,
+		`    |___|  |___|  |___|  |___|  |___|  |___|`,
+		`     (_)    (_)    (_)    (_)    (_)    (_)`,
+	}
+
+	var artContent []string
+	for i := 0; i < artInner; i++ {
+		var line string
+		if i < len(artPalette) {
+			line = artPalette[i]
+		}
+		lineW := lipgloss.Width(line)
+		pad := (rightWidth - 2 - lineW) / 2
+		if pad < 0 {
+			pad = 0
+		}
+		artContent = append(artContent, strings.Repeat(" ", pad)+line)
+	}
+	artBox := titledPanel("On Air", strings.Join(artContent, "\n"), rightWidth, artInner, colorPeach)
+
+	rightColumn := lipgloss.JoinVertical(lipgloss.Left, nowBox, progressBox, lyricsBox, artBox)
+	// Safety pad: if the right column is still shorter than the library box,
+	// append blank lines so the layout stays flush.
 	if h := lipgloss.Height(rightColumn); h < listHeight+2 {
 		rightColumn += strings.Repeat("\n", listHeight+2-h)
 	}
