@@ -322,7 +322,14 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	if innerWidth < 40 {
 		innerWidth = 40
 	}
-	leftWidth := (innerWidth * 48) / 100
+	// F5 toggles between 5:5 (equal halves) and 3:8 (wide right column,
+	// giving the LED equalizer more horizontal room).
+	var leftWidth int
+	if m.musicSplit == 1 {
+		leftWidth = (innerWidth * 3) / 11
+	} else {
+		leftWidth = innerWidth / 2
+	}
 	if leftWidth < 28 {
 		leftWidth = 28
 	}
@@ -759,7 +766,7 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	}
 	mainSplit := lipgloss.JoinHorizontal(lipgloss.Top, libraryBox, " ", rightColumn)
 
-	footerText := "[Enter/Space] Play/Pause • [t] EQ Mode • [f] Fav • [n/p] Next/Prev • [r] Rescan • [Tab] Switch • [?] Help • [q] Quit"
+	footerText := "[Enter/Space] Play/Pause • [t] EQ Mode • [f] Fav • [n/p] Next/Prev • [F5] Layout • [r] Rescan • [Tab] Switch • [?] Help • [q] Quit"
 	footer := helpStyle.Render(footerText)
 
 	body := lipgloss.JoinVertical(

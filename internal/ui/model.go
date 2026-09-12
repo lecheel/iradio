@@ -90,6 +90,7 @@ type Model struct {
 	volumeStr    string
 	realSpectrum bool
 	eqMode       EQMode
+	musicSplit   int // 0 = 5:5 (equal) split, 1 = 3:8 (wide right) split
 }
 
 // New builds the initial Model, loading favorites, hidden flags and the
@@ -115,6 +116,11 @@ func New() *Model {
 	savedEQMode := config.LoadInt("eq_mode.json", 0)
 	if savedEQMode < 0 || savedEQMode > int(EQModeCircle) {
 		savedEQMode = 0
+	}
+
+	savedMusicSplit := config.LoadInt("music_split.json", 0)
+	if savedMusicSplit < 0 || savedMusicSplit > 1 {
+		savedMusicSplit = 0
 	}
 
 	eqDB, err := eqcache.Open()
@@ -156,6 +162,7 @@ func New() *Model {
 		showHelp:     false,
 		volumeStr:    config.SystemVolume(),
 		eqMode:       EQMode(savedEQMode),
+		musicSplit:   savedMusicSplit,
 	}
 	m.clampOffsets()
 	return m
@@ -591,6 +598,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTab = 2
 			config.SaveInt("last_tab.json", m.activeTab)
 			m.clampOffsets()
+
+		case "f5":
+			m.pendingTabID++
+			m.countBuffer = ""
+			m.musicSplit = (m.musicSplit + 1) % 2
+			config.SaveInt("music_split.json", m.musicSplit)
+			if m.musicSplit == 0 {
+				m.statusMsg = "Music layout: 5:5 split"
+			} else {
+				m.statusMsg = "Music layout: 3:8 split"
+			}
 
 		case "r":
 			if m.activeTab == 2 {

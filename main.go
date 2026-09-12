@@ -127,6 +127,7 @@ INTERACTIVE TUI KEYBINDINGS:
   H                    Toggle viewing hidden radio stations
   r                    Rescan ~/Music for audio files
   Tab / F1-F3          Switch tabs: Stations, Favorites, Music
+  F5                   Toggle Music tab layout between 5:5 and 3:8 split
   j / k, ↑ / ↓         Move down / up (supports [count]j, e.g. 3j)
   J / K                Jump to next / previous country section
   gg / G               Jump to first / last item
