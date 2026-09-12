@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"math/cmplx"
 	"math/rand"
 	"net/http"
 	"os"
@@ -316,8 +318,15 @@ var allStations = []Station{
 // -----------------------------------------------------------------------------
 
 type AudioPlayer struct {
-	mu     sync.Mutex
-	cancel context.CancelFunc
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	specChan chan []int
+}
+
+// hasFFmpeg reports whether ffmpeg is available for real-spectrum decoding.
+func hasFFmpeg() bool {
+	_, err := exec.LookPath("ffmpeg")
+	return err == nil
 }
 
 func resolveStreamURL(u string) string {
@@ -383,6 +392,10 @@ func (p *AudioPlayer) Play(url string) error {
 		return err
 	}
 
+	if p.specChan != nil && hasFFmpeg() {
+		p.startSpectrumAnalyzer(ctx, url)
+	}
+
 	go func() {
 		_ = cmd.Wait()
 	}()
@@ -396,6 +409,124 @@ func (p *AudioPlayer) Stop() {
 		p.cancel()
 		p.cancel = nil
 	}
+}
+
+// startSpectrumAnalyzer decodes the same source to raw mono PCM via ffmpeg
+// and FFTs it in real time, pushing 0-6 scaled bar levels to specChan. This
+// gives an actual audio-driven EQ instead of a simulated one.
+func (p *AudioPlayer) startSpectrumAnalyzer(ctx context.Context, source string) {
+	const sampleRate = 22050
+	const chunkSize = 1024
+	const numBars = 32
+
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-v", "quiet",
+		"-i", source,
+		"-f", "f32le",
+		"-ac", "1",
+		"-ar", strconv.Itoa(sampleRate),
+		"pipe:1",
+	)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		return
+	}
+
+	go func() {
+		defer cmd.Wait()
+		buf := make([]byte, chunkSize*4)
+		samples := make([]float64, chunkSize)
+		for {
+			if _, err := io.ReadFull(stdout, buf); err != nil {
+				return
+			}
+			for i := 0; i < chunkSize; i++ {
+				bits := binary.LittleEndian.Uint32(buf[i*4:])
+				samples[i] = float64(math.Float32frombits(bits))
+			}
+			bars := computeSpectrumBars(samples, sampleRate, numBars)
+			select {
+			case p.specChan <- bars:
+			default:
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+	}()
+}
+
+func fft(a []complex128) {
+	n := len(a)
+	if n <= 1 {
+		return
+	}
+	even := make([]complex128, n/2)
+	odd := make([]complex128, n/2)
+	for i := 0; i < n/2; i++ {
+		even[i] = a[2*i]
+		odd[i] = a[2*i+1]
+	}
+	fft(even)
+	fft(odd)
+	for k := 0; k < n/2; k++ {
+		t := cmplx.Rect(1, -2*math.Pi*float64(k)/float64(n)) * odd[k]
+		a[k] = even[k] + t
+		a[k+n/2] = even[k] - t
+	}
+}
+
+// computeSpectrumBars windows + FFTs a chunk of mono samples and bins the
+// magnitude spectrum into numBars log-spaced bands scaled to 0-6.
+func computeSpectrumBars(samples []float64, sampleRate int, numBars int) []int {
+	n := len(samples)
+	data := make([]complex128, n)
+	for i, s := range samples {
+		w := 0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/float64(n-1))
+		data[i] = complex(s*w, 0)
+	}
+	fft(data)
+
+	mags := make([]float64, n/2)
+	for i := range mags {
+		mags[i] = cmplx.Abs(data[i])
+	}
+
+	bars := make([]int, numBars)
+	minHz, maxHz := 40.0, float64(sampleRate)/2 // keep in sync with spectrumMinHz/spectrumMaxHz in renderMusicView
+	logMin, logMax := math.Log10(minHz), math.Log10(maxHz)
+	binHz := float64(sampleRate) / float64(n)
+
+	for b := 0; b < numBars; b++ {
+		f0 := math.Pow(10, logMin+(logMax-logMin)*float64(b)/float64(numBars))
+		f1 := math.Pow(10, logMin+(logMax-logMin)*float64(b+1)/float64(numBars))
+		i0 := maxInt(1, int(f0/binHz))
+		i1 := minInt(len(mags)-1, int(f1/binHz))
+		if i1 <= i0 {
+			i1 = i0 + 1
+		}
+		peak := 0.0
+		for i := i0; i < i1 && i < len(mags); i++ {
+			if mags[i] > peak {
+				peak = mags[i]
+			}
+		}
+		db := 20 * math.Log10(peak+1e-6)
+		level := (db + 60) / 10
+		if level < 0 {
+			level = 0
+		}
+		if level > 6 {
+			level = 6
+		}
+		bars[b] = int(level)
+	}
+	return bars
 }
 
 // -----------------------------------------------------------------------------
@@ -846,9 +977,21 @@ type tickMsg time.Time
 func tickCmd() tea.Cmd {
 	// Faster tick so the LED spectrum can interpolate smoothly instead of
 	// jumping between values every 200ms.
-	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+// SpectrumMsg carries a real, ffmpeg/FFT-derived set of bar levels.
+type SpectrumMsg struct {
+	Bars []int
+}
+
+func waitForSpectrum(ch chan []int) tea.Cmd {
+	return func() tea.Msg {
+		bars := <-ch
+		return SpectrumMsg{Bars: bars}
+	}
 }
 
 func minInt(a, b int) int {
@@ -924,6 +1067,7 @@ type Model struct {
 	pendingTabID int
 	showHelp     bool
 	volumeStr    string
+	realSpectrum bool
 }
 
 func (m *Model) getAndResetCount() int {
@@ -1149,7 +1293,8 @@ func initialModel() Model {
 		hidden:       hidden,
 		musicFavs:    mFavs,
 		showHidden:   false,
-		audio:        &AudioPlayer{},
+		audio:        &AudioPlayer{specChan: make(chan []int, 4)},
+		realSpectrum: hasFFmpeg(),
 		playingIdx:   -1,
 		isPlaying:    false,
 		isMusic:      false,
@@ -1166,7 +1311,7 @@ func initialModel() Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tickCmd()
+	return tea.Batch(tickCmd(), waitForSpectrum(m.audio.specChan))
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1178,23 +1323,64 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.clampOffsets()
 
+	case SpectrumMsg:
+		if m.isPlaying {
+			n := minInt(len(msg.Bars), len(m.bars))
+			copy(m.bars, msg.Bars[:n])
+		}
+		cmds = append(cmds, waitForSpectrum(m.audio.specChan))
+
 	case tickMsg:
 		if m.isPlaying {
 			m.artFrame++
+			// Real spectrum arrives via SpectrumMsg when ffmpeg is
+			// available; otherwise fall back to a smoothed random walk
+			// so the EQ still animates.
+			if !m.realSpectrum {
+				for i := range m.bars {
+					r := rand.Intn(100)
+					switch {
+					case r < 60:
+						// hold current value
+					case r < 80:
+						m.bars[i]++
+					case r < 97:
+						m.bars[i]--
+					default:
+						if rand.Intn(2) == 0 {
+							m.bars[i] += 2
+						} else {
+							m.bars[i] -= 2
+						}
+					}
+					if m.bars[i] < 0 {
+						m.bars[i] = 0
+					} else if m.bars[i] > 6 {
+						m.bars[i] = 6
+					}
+				}
+			}
+
+			// QE-style peak-hold with gravity: peaks snap up instantly to
 			// Smooth random walk so bars move gradually instead of
 			// jumping randomly every tick. Reads like a real VU meter.
 			for i := range m.bars {
 				r := rand.Intn(100)
 				switch {
-				case r < 40:
+				case r < 60:
 					// hold current value
-				case r < 65:
+				case r < 80:
 					m.bars[i]++
-				case r < 90:
+				case r < 97:
 					m.bars[i]--
 				default:
-					// occasional larger jump
-					m.bars[i] = rand.Intn(7)
+					// small nudge instead of a hard reset, so motion
+					// stays continuous instead of jumping around
+					if rand.Intn(2) == 0 {
+						m.bars[i] += 2
+					} else {
+						m.bars[i] -= 2
+					}
 				}
 				if m.bars[i] < 0 {
 					m.bars[i] = 0
@@ -1202,13 +1388,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.bars[i] = 6
 				}
 			}
+
 			// QE-style peak-hold with gravity: peaks snap up instantly to
 			// match the current bar, then drift back down at a constant
 			// rate, producing the classic floating-dot effect.
 			if len(m.peaks) != len(m.bars) {
 				m.peaks = make([]float64, len(m.bars))
 			}
-			const peakGravity = 0.25 // bar-units per tick (~2s full fall)
+			const peakGravity = 0.12 // bar-units per tick (slower fall at 150ms ticks)
 			for i := range m.bars {
 				cur := float64(m.bars[i])
 				if cur >= m.peaks[i] {
@@ -2477,6 +2664,9 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	bars := m.bars[:barCount]
 
 	const barMax = 6
+	const spectrumMinHz = 40.0
+	const spectrumMaxHz = 11025.0 // Nyquist for the 22050Hz analysis sample rate
+	const spectrumTotalBars = 32  // must match numBars in computeSpectrumBars
 
 	// Stereo meter stats derived from the bar values.
 	peak, sum := 0, 0
@@ -2570,13 +2760,46 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 		spectrumLines = append(spectrumLines, sb.String())
 	}
 
-	// Baseline ruler + frequency axis.
+	// Baseline ruler + frequency axis. Labels are placed at the column that
+	// actually corresponds to that frequency's FFT bin (log-spaced, same
+	// mapping as computeSpectrumBars), so they stay aligned regardless of
+	// how many columns fit on screen.
 	baseW := barCount*2 - 1
 	if baseW < 1 {
 		baseW = 1
 	}
 	baseline := "  " + lipgloss.NewStyle().Foreground(colorSubtext).Render(strings.Repeat("▀", baseW))
-	freqLabel := "  " + lipgloss.NewStyle().Foreground(colorSubtext).Render("50  100 250 500  1k   2k   4k  8k  16k")
+
+	freqPoints := []struct {
+		hz    float64
+		label string
+	}{
+		{50, "50"}, {100, "100"}, {250, "250"}, {500, "500"},
+		{1000, "1k"}, {2000, "2k"}, {4000, "4k"}, {8000, "8k"}, {16000, "16k"},
+	}
+	logMin := math.Log10(spectrumMinHz)
+	logMax := math.Log10(spectrumMaxHz)
+
+	axis := []rune(strings.Repeat(" ", baseW))
+	lastEnd := -1
+	for _, fp := range freqPoints {
+		if fp.hz < spectrumMinHz || fp.hz > spectrumMaxHz {
+			continue
+		}
+		bin := int((math.Log10(fp.hz)-logMin)/(logMax-logMin)*spectrumTotalBars + 0.5)
+		if bin >= barCount {
+			continue
+		}
+		col := bin * 2
+		if col <= lastEnd || col+len(fp.label) > baseW {
+			continue
+		}
+		for i, r := range fp.label {
+			axis[col+i] = r
+		}
+		lastEnd = col + len(fp.label)
+	}
+	freqLabel := "  " + lipgloss.NewStyle().Foreground(colorSubtext).Render(string(axis))
 
 	status := "◌ IDLE"
 	if m.isPlaying {
