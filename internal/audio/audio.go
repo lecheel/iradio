@@ -132,6 +132,20 @@ func (p *Player) Stop() {
 		p.cancel()
 		p.cancel = nil
 	}
+	p.drainSpecChan()
+}
+
+func (p *Player) drainSpecChan() {
+	if p.SpecChan == nil {
+		return
+	}
+	for {
+		select {
+		case <-p.SpecChan:
+		default:
+			return
+		}
+	}
 }
 
 // startSpectrumAnalyzer decodes the same source to raw mono PCM via ffmpeg
@@ -141,14 +155,32 @@ func (p *Player) startSpectrumAnalyzer(ctx context.Context, source string) {
 	const chunkSize = 1024
 	const numBars = 32
 
-	cmd := exec.CommandContext(ctx, "ffmpeg",
+	args := []string{
 		"-v", "quiet",
+		"-nostdin",
+	}
+
+	isNetwork := strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://")
+	if isNetwork {
+		args = append(args,
+			"-reconnect", "1",
+			"-reconnect_streamed", "1",
+			"-reconnect_delay_max", "5",
+		)
+	} else {
+		// Read at native 1x playback rate for local files so ffmpeg decodes in real time
+		args = append(args, "-re")
+	}
+
+	args = append(args,
 		"-i", source,
 		"-f", "f32le",
 		"-ac", "1",
 		"-ar", strconv.Itoa(sampleRate),
 		"pipe:1",
 	)
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return
@@ -159,6 +191,11 @@ func (p *Player) startSpectrumAnalyzer(ctx context.Context, source string) {
 
 	go func() {
 		defer cmd.Wait()
+
+		chunkDuration := time.Duration(chunkSize) * time.Second / time.Duration(sampleRate)
+		ticker := time.NewTicker(chunkDuration)
+		defer ticker.Stop()
+
 		buf := make([]byte, chunkSize*4)
 		samples := make([]float64, chunkSize)
 		for {
@@ -170,11 +207,15 @@ func (p *Player) startSpectrumAnalyzer(ctx context.Context, source string) {
 				samples[i] = float64(math.Float32frombits(bits))
 			}
 			bars := computeSpectrumBars(samples, sampleRate, numBars)
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+
 			select {
 			case p.SpecChan <- bars:
-			default:
-			}
-			select {
 			case <-ctx.Done():
 				return
 			default:
@@ -215,8 +256,12 @@ func computeSpectrumBars(samples []float64, sampleRate int, numBars int) []int {
 	fft(data)
 
 	mags := make([]float64, n/2)
+	// Normalise by 4/N to compensate for the Hann window's coherent gain
+	// (0.5). Without this, FFT magnitudes for full-scale audio sit around
+	// +40 dB and every band pegs at the maximum level.
+	norm := 4.0 / float64(n)
 	for i := range mags {
-		mags[i] = cmplx.Abs(data[i])
+		mags[i] = cmplx.Abs(data[i]) * norm
 	}
 
 	bars := make([]int, numBars)
@@ -232,21 +277,35 @@ func computeSpectrumBars(samples []float64, sampleRate int, numBars int) []int {
 		if i1 <= i0 {
 			i1 = i0 + 1
 		}
-		peak := 0.0
+		sumSq := 0.0
+		count := 0
 		for i := i0; i < i1 && i < len(mags); i++ {
-			if mags[i] > peak {
-				peak = mags[i]
-			}
+			sumSq += mags[i] * mags[i]
+			count++
 		}
-		db := 20 * math.Log10(peak+1e-6)
-		level := (db + 60) / 10
+		val := 0.0
+		if count > 0 {
+			val = math.Sqrt(sumSq / float64(count))
+		}
+
+		// Treble tilt compensation (equal-loudness / pink noise balance)
+		centerHz := math.Sqrt(f0 * f1)
+		tilt := math.Pow(centerHz/400.0, 0.22)
+		val *= tilt
+
+		db := 20 * math.Log10(val+1e-6)
+		// Dynamic range window (-42..-2 dBFS) so bars bounce expressively
+		// across all 0..6 levels rather than pegging at the maximum.
+		const minDB = -42.0
+		const maxDB = -2.0
+		level := (db - minDB) * 6.0 / (maxDB - minDB)
 		if level < 0 {
 			level = 0
 		}
 		if level > 6 {
 			level = 6
 		}
-		bars[b] = int(level)
+		bars[b] = int(math.Round(level))
 	}
 	return bars
 }

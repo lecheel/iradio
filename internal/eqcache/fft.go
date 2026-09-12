@@ -127,8 +127,12 @@ func (sa *spectrumAnalyzer) compute(samples []float64, sampleRate int) []int {
 	sa.plan.transform(d)
 
 	mags := sa.mags
+	// Normalise by 4/N to compensate for the Hann window's coherent gain
+	// (0.5). Without this, FFT magnitudes for full-scale audio sit around
+	// +40 dB and every band pegs at the maximum level.
+	norm := 4.0 / float64(n)
 	for i := range mags {
-		mags[i] = cmplx.Abs(d[i])
+		mags[i] = cmplx.Abs(d[i]) * norm
 	}
 
 	minHz, maxHz := 40.0, float64(sampleRate)/2
@@ -144,21 +148,35 @@ func (sa *spectrumAnalyzer) compute(samples []float64, sampleRate int) []int {
 		if i1 <= i0 {
 			i1 = i0 + 1
 		}
-		peak := 0.0
+		sumSq := 0.0
+		count := 0
 		for i := i0; i < i1 && i < len(mags); i++ {
-			if mags[i] > peak {
-				peak = mags[i]
-			}
+			sumSq += mags[i] * mags[i]
+			count++
 		}
-		db := 20 * math.Log10(peak+1e-6)
-		level := (db + 60) / 10
+		val := 0.0
+		if count > 0 {
+			val = math.Sqrt(sumSq / float64(count))
+		}
+
+		// Treble tilt compensation (equal-loudness / pink noise balance)
+		centerHz := math.Sqrt(f0 * f1)
+		tilt := math.Pow(centerHz/400.0, 0.22)
+		val *= tilt
+
+		db := 20 * math.Log10(val+1e-6)
+		// Dynamic range window (-42..-2 dBFS) so bars bounce expressively
+		// across all 0..6 levels rather than pegging at the maximum.
+		const minDB = -42.0
+		const maxDB = -2.0
+		level := (db - minDB) * 6.0 / (maxDB - minDB)
 		if level < 0 {
 			level = 0
 		}
 		if level > 6 {
 			level = 6
 		}
-		sa.out[b] = int(level)
+		sa.out[b] = int(math.Round(level))
 	}
 	return sa.out
 }

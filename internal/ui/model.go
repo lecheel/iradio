@@ -3,6 +3,7 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"strconv"
 	"time"
@@ -20,8 +21,8 @@ import (
 type tickMsg time.Time
 
 func tickCmd() tea.Cmd {
-	// Faster tick so the LED spectrum can interpolate smoothly.
-	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
+	// ~30 FPS tick so the LED spectrum and peaks interpolate fluidly.
+	return tea.Tick(30*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
@@ -70,6 +71,8 @@ type Model struct {
 	trackElapsed time.Duration
 	statusMsg    string
 	bars         []int
+	smoothBars   []float64 // smoothly decayed values for 30fps animation
+	targetBars   []float64 // target values received from FFT or precomputed cache
 	peaks        []float64 // QE-style peak-hold markers (bar-value space 0..6)
 	countBuffer  string
 	pendingTabID int
@@ -124,6 +127,8 @@ func New() *Model {
 		musicPlaying: -1,
 		statusMsg:    status,
 		bars:         make([]int, 32),
+		smoothBars:   make([]float64, 32),
+		targetBars:   make([]float64, 32),
 		peaks:        make([]float64, 32),
 		countBuffer:  "",
 		pendingTabID: 0,
@@ -370,8 +375,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SpectrumMsg:
 		if m.isPlaying {
-			n := minInt(len(msg.Bars), len(m.bars))
-			copy(m.bars, msg.Bars[:n])
+			n := minInt(len(msg.Bars), len(m.targetBars))
+			for i := 0; i < n; i++ {
+				m.targetBars[i] = float64(msg.Bars[i])
+			}
 		}
 		cmds = append(cmds, waitForSpectrum(m.player.SpecChan))
 
@@ -381,43 +388,66 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.isMusic && m.cachedEQ != nil {
 				// Precomputed EQ frames from the sqlite cache: no ffmpeg
 				// decoding happens at playtime, we just index by elapsed
-				// time and copy into the bar array.
+				// time and copy into the target bar array.
 				ms := int(time.Since(m.trackStart).Milliseconds())
 				if bars := m.cachedEQ.BarsAt(ms); bars != nil {
-					n := minInt(len(bars), len(m.bars))
-					copy(m.bars, bars[:n])
+					n := minInt(len(bars), len(m.targetBars))
+					for i := 0; i < n; i++ {
+						m.targetBars[i] = float64(bars[i])
+					}
 				}
 			} else if !m.realSpectrum {
-				for i := range m.bars {
+				for i := range m.targetBars {
 					r := rand.Intn(100)
 					switch {
-					case r < 60:
-						// hold current value
-					case r < 80:
-						m.bars[i]++
-					case r < 97:
-						m.bars[i]--
+					case r < 55:
+						// hold
+					case r < 75:
+						m.targetBars[i] += 1
+					case r < 95:
+						m.targetBars[i] -= 1
 					default:
 						if rand.Intn(2) == 0 {
-							m.bars[i] += 2
+							m.targetBars[i] += 2
 						} else {
-							m.bars[i] -= 2
+							m.targetBars[i] -= 2
 						}
 					}
-					if m.bars[i] < 0 {
-						m.bars[i] = 0
-					} else if m.bars[i] > 6 {
-						m.bars[i] = 6
+					if m.targetBars[i] < 0 {
+						m.targetBars[i] = 0
+					} else if m.targetBars[i] > 6 {
+						m.targetBars[i] = 6
 					}
 				}
+			}
+
+			// Smooth interpolation: fast attack on peaks, graceful decay on falls.
+			const attack = 0.70
+			const decay = 0.28
+			for i := range m.bars {
+				target := m.targetBars[i]
+				if target > m.smoothBars[i] {
+					m.smoothBars[i] += (target - m.smoothBars[i]) * attack
+				} else {
+					m.smoothBars[i] -= decay
+					if m.smoothBars[i] < target {
+						m.smoothBars[i] = target
+					}
+				}
+				if m.smoothBars[i] < 0 {
+					m.smoothBars[i] = 0
+				} else if m.smoothBars[i] > 6 {
+					m.smoothBars[i] = 6
+				}
+				m.bars[i] = int(math.Round(m.smoothBars[i]))
 			}
 
 			if len(m.peaks) != len(m.bars) {
 				m.peaks = make([]float64, len(m.bars))
 			}
-			const peakGravity = 0.12
+			const peakGravity = 0.08
 			for i := range m.bars {
-				cur := float64(m.bars[i])
+				cur := m.smoothBars[i]
 				if cur >= m.peaks[i] {
 					m.peaks[i] = cur
 				} else {
@@ -437,11 +467,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			for i := range m.bars {
 				m.bars[i] = 0
-			}
-			if len(m.peaks) != len(m.bars) {
-				m.peaks = make([]float64, len(m.bars))
-			}
-			for i := range m.peaks {
+				m.smoothBars[i] = 0
+				m.targetBars[i] = 0
 				m.peaks[i] = 0
 			}
 		}
@@ -788,6 +815,15 @@ func (m *Model) getCurrentStation() *stations.Station {
 	return nil
 }
 
+func (m *Model) resetBars() {
+	for i := range m.bars {
+		m.bars[i] = 0
+		m.smoothBars[i] = 0
+		m.targetBars[i] = 0
+		m.peaks[i] = 0
+	}
+}
+
 func (m *Model) playMusicTrack(idx int) {
 	if idx < 0 || idx >= len(m.musicTracks) {
 		return
@@ -828,9 +864,11 @@ func (m *Model) playMusicTrack(idx int) {
 		m.isPlaying = false
 		m.isMusic = false
 		m.cachedEQ = nil
+		m.resetBars()
 		return
 	}
 
+	m.resetBars()
 	m.isPlaying = true
 	m.isMusic = true
 	m.musicPlaying = idx
@@ -859,6 +897,7 @@ func (m *Model) togglePlayMusic() {
 		m.isPlaying = false
 		m.isMusic = false
 		m.cachedEQ = nil
+		m.resetBars()
 		m.statusMsg = fmt.Sprintf("Stopped: %s", m.musicTracks[m.musicCursor].Filename)
 		if m.mprisSvc != nil {
 			m.mprisSvc.UpdateMusic("Stopped", nil)
@@ -909,6 +948,7 @@ func (m *Model) togglePlay() {
 	if m.isPlaying && !m.isMusic && m.playingIdx == targetIdx {
 		m.player.Stop()
 		m.isPlaying = false
+		m.resetBars()
 		m.statusMsg = fmt.Sprintf("Stopped: %s", target.NameEn)
 		if m.mprisSvc != nil {
 			m.mprisSvc.Update("Stopped", nil)
@@ -920,9 +960,11 @@ func (m *Model) togglePlay() {
 	if err != nil {
 		m.statusMsg = fmt.Sprintf("Audio Error: %v", err)
 		m.isPlaying = false
+		m.resetBars()
 		return
 	}
 
+	m.resetBars()
 	m.isPlaying = true
 	m.isMusic = false
 	m.musicPlaying = -1

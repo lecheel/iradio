@@ -32,9 +32,15 @@ func main() {
 			fmt.Printf("iradio %s\n", version)
 			return
 		case "--process_eq", "-process_eq":
-			// Consumes everything after it (optional filename filter).
+			// Consumes everything after it (optional recreate flag and filename filter).
 			if err := runProcessEQ(args[i+1:]); err != nil {
 				fmt.Fprintf(os.Stderr, "process_eq: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "--recreate_eq", "-recreate_eq":
+			if err := runProcessEQ(append([]string{"--recreate"}, args[i+1:]...)); err != nil {
+				fmt.Fprintf(os.Stderr, "recreate_eq: %v\n", err)
 				os.Exit(1)
 			}
 			return
@@ -77,7 +83,9 @@ func printUsage(w io.Writer) {
 
 USAGE:
   iradio [FLAGS]                 Launch the interactive TUI player
-  iradio --process_eq [FILTER]   Precompute EQ data for local tracks
+  iradio [FLAGS]                 Launch the interactive TUI player
+  iradio --process_eq [FLAGS]    Precompute EQ data for local tracks
+  iradio --recreate_eq [FILTER]  Wipe and recompute EQ data for local tracks
 
 FLAGS:
   -h, --help           Show this help message and exit
@@ -85,19 +93,21 @@ FLAGS:
       --eq             Force live (realtime) FFT spectrum analysis
 
 SUBCOMMANDS:
-  --process_eq [FILTER]
+  --process_eq [--recreate] [FILTER]
         Walk ~/Music, run ffmpeg + FFT over each supported audio file
         and store the resulting spectrum frames in the SQLite EQ cache
         (~/.cache/iradio/eq.sqlite). Once cached, playback renders the
         LED equalizer by reading frames directly, with no ffmpeg/FFT
         work and no ffprobe duration probe at playtime.
 
-        FILTER is an optional case-insensitive substring matched against
-        each track's filename; when given, only matching tracks are
-        processed.
+        Options:
+          --recreate, -f  Clear existing cached tracks and re-analyze
+                          every audio file from scratch.
+          FILTER          Optional case-insensitive substring matched
+                          against each track's filename.
 
-        Re-running only analyzes files that are new or whose mtime/size
-        changed since the last run, so it is safe to run repeatedly.
+  --recreate_eq [FILTER]
+        Shortcut for 'iradio --process_eq --recreate [FILTER]'.
 
 EQ MODES:
   By default, local tracks use the precomputed cache from --process_eq
@@ -133,6 +143,8 @@ EXAMPLES:
   iradio                         # launch the player
   iradio --eq                    # launch the player, force live FFT EQ
   iradio --process_eq            # cache EQ for every track in ~/Music
+  iradio --process_eq --recreate # recompute and overwrite existing cache
+  iradio --recreate_eq           # shortcut to recompute all tracks
   iradio --process_eq jazz       # cache EQ only for tracks matching "jazz"
 
 `, version)
@@ -143,7 +155,17 @@ EXAMPLES:
 // them in the sqlite EQ cache so playback can render the equalizer without
 // running ffmpeg or an FFT at runtime.
 func runProcessEQ(extra []string) error {
-	fmt.Println("Preprocessing EQ data for tracks in ~/Music ...")
+	recreate := false
+	var filter string
+
+	for _, arg := range extra {
+		lower := strings.ToLower(arg)
+		if lower == "--recreate" || lower == "-recreate" || lower == "recreate" || lower == "--force" || lower == "-f" {
+			recreate = true
+		} else if !strings.HasPrefix(arg, "-") && filter == "" {
+			filter = lower
+		}
+	}
 
 	tracks := music.LoadTracks()
 	if len(tracks) == 0 {
@@ -156,9 +178,13 @@ func runProcessEQ(extra []string) error {
 	}
 	defer db.Close()
 
-	var filter string
-	if len(extra) > 0 {
-		filter = strings.ToLower(extra[0])
+	if recreate {
+		fmt.Println("Recreating EQ cache (clearing existing cached entries)...")
+		if err := db.ClearAll(); err != nil {
+			return fmt.Errorf("clear eq cache: %w", err)
+		}
+	} else {
+		fmt.Println("Preprocessing EQ data for tracks in ~/Music ...")
 	}
 
 	// Build the work list, pruning cached and filtered-out tracks.

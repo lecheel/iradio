@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	_ "modernc.org/sqlite"
 )
@@ -65,20 +66,58 @@ func cacheDir() string {
 	return filepath.Join(home, ".cache", "iradio")
 }
 
+// schemaVersion is bumped whenever the analysis algorithm changes in a way
+// that would make existing cached bars stale. On mismatch the track_eq table
+// is wiped so the next --process_eq run repopulates it with fresh data.
+const schemaVersion = 3
+
+// schemaStatements are plain SQL strings (no backticks) executed in order on
+// database open, so the file survives being round-tripped through tools that
+// mangle raw string literals.
+var schemaStatements = []string{
+	"CREATE TABLE IF NOT EXISTS meta (" +
+		"key TEXT PRIMARY KEY, " +
+		"value TEXT NOT NULL" +
+		");",
+	"CREATE TABLE IF NOT EXISTS track_eq (" +
+		"path TEXT PRIMARY KEY, " +
+		"mtime_unix INTEGER NOT NULL, " +
+		"size INTEGER NOT NULL, " +
+		"duration_ms INTEGER NOT NULL, " +
+		"hop_ms INTEGER NOT NULL, " +
+		"num_bars INTEGER NOT NULL, " +
+		"bars BLOB NOT NULL" +
+		");",
+	"CREATE INDEX IF NOT EXISTS idx_track_eq_mtime ON track_eq(mtime_unix);",
+}
+
 func initSchema(db *sql.DB) error {
-	_, err := db.Exec(`
-        CREATE TABLE IF NOT EXISTS track_eq (
-            path        TEXT PRIMARY KEY,
-            mtime_unix  INTEGER NOT NULL,
-            size        INTEGER NOT NULL,
-            duration_ms INTEGER NOT NULL,
-            hop_ms      INTEGER NOT NULL,
-            num_bars    INTEGER NOT NULL,
-            bars        BLOB NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_track_eq_mtime ON track_eq(mtime_unix);
-    `)
-	return err
+	for _, stmt := range schemaStatements {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+
+	var stored string
+	err := db.QueryRow("SELECT value FROM meta WHERE key='schema_version'").Scan(&stored)
+	if err == sql.ErrNoRows {
+		_, _ = db.Exec("INSERT INTO meta(key, value) VALUES('schema_version', ?)",
+			strconv.Itoa(schemaVersion))
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if stored != strconv.Itoa(schemaVersion) {
+		if _, err := db.Exec("DELETE FROM track_eq"); err != nil {
+			return err
+		}
+		if _, err := db.Exec("UPDATE meta SET value=? WHERE key='schema_version'",
+			strconv.Itoa(schemaVersion)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Lookup returns the cached EQ if it's still fresh (file unchanged).
@@ -143,4 +182,13 @@ func (d *DB) Count() int {
 	var n int
 	_ = d.db.QueryRow(`SELECT COUNT(*) FROM track_eq`).Scan(&n)
 	return n
+}
+
+// ClearAll removes all precomputed EQ entries from the cache.
+func (d *DB) ClearAll() error {
+	if d == nil || d.db == nil {
+		return fmt.Errorf("eqcache: nil db")
+	}
+	_, err := d.db.Exec(`DELETE FROM track_eq`)
+	return err
 }
