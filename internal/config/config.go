@@ -40,6 +40,36 @@ func SaveBoolMap(name string, m map[string]bool) {
 	}
 }
 
+// LoadIntMap reads a JSON map[string]int, returning an empty map on error.
+func LoadIntMap(name string) map[string]int {
+	m := make(map[string]int)
+	if data, err := os.ReadFile(path(name)); err == nil {
+		_ = json.Unmarshal(data, &m)
+	}
+	return m
+}
+
+// SaveIntMap writes a map[string]int as indented JSON.
+func SaveIntMap(name string, m map[string]int) {
+	if data, err := json.MarshalIndent(m, "", "  "); err == nil {
+		_ = os.WriteFile(path(name), data, 0644)
+	}
+}
+
+// LoadString reads a plain string value, returning "" on error.
+func LoadString(name string) string {
+	data, err := os.ReadFile(path(name))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// SaveString writes a plain string value to the config directory.
+func SaveString(name, val string) {
+	_ = os.WriteFile(path(name), []byte(val), 0644)
+}
+
 // LoadInt reads an integer value from the config directory, returning fallback on error.
 func LoadInt(name string, fallback int) int {
 	data, err := os.ReadFile(path(name))

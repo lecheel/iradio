@@ -73,6 +73,7 @@ type PlayOption func(*playOptions)
 
 type playOptions struct {
 	skipAnalyzer bool
+	startPos     time.Duration
 }
 
 // WithoutAnalyzer disables the realtime ffmpeg spectrum analyzer. Use this
@@ -80,6 +81,12 @@ type playOptions struct {
 // instead, so we don't spin up a second ffmpeg decoding process at playtime.
 func WithoutAnalyzer() PlayOption {
 	return func(o *playOptions) { o.skipAnalyzer = true }
+}
+
+// WithStartPosition seeks to pos before playback begins. It is ignored for
+// network streams (only local files honour the resume offset).
+func WithStartPosition(pos time.Duration) PlayOption {
+	return func(o *playOptions) { o.startPos = pos }
 }
 
 // Play starts playback of the given URL (stream or local file).
@@ -92,14 +99,28 @@ func (p *Player) Play(url string, opts ...PlayOption) error {
 	p.Stop()
 	url = resolveStreamURL(url)
 
+	isNetwork := strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
+	seekSecs := ""
+	if !isNetwork && po.startPos > 0 {
+		seekSecs = strconv.FormatFloat(po.startPos.Seconds(), 'f', 3, 64)
+	}
+
 	var playerBin string
 	var args []string
 	if _, err := exec.LookPath("mpv"); err == nil {
 		playerBin = "mpv"
-		args = []string{"--no-video", "--really-quiet", "--network-timeout=15", url}
+		args = []string{"--no-video", "--really-quiet", "--network-timeout=15"}
+		if seekSecs != "" {
+			args = append(args, "--start="+seekSecs)
+		}
+		args = append(args, url)
 	} else if _, err := exec.LookPath("ffplay"); err == nil {
 		playerBin = "ffplay"
-		args = []string{"-nodisp", "-autoexit", "-loglevel", "quiet", url}
+		args = []string{"-nodisp", "-autoexit", "-loglevel", "quiet"}
+		if seekSecs != "" {
+			args = append(args, "-ss", seekSecs)
+		}
+		args = append(args, url)
 	} else {
 		return fmt.Errorf("neither 'mpv' nor 'ffplay' found in PATH")
 	}
@@ -115,7 +136,7 @@ func (p *Player) Play(url string, opts ...PlayOption) error {
 	}
 
 	if !po.skipAnalyzer && p.SpecChan != nil && HasFFmpeg() {
-		p.startSpectrumAnalyzer(ctx, url)
+		p.startSpectrumAnalyzer(ctx, url, po.startPos)
 	}
 
 	go func() {
@@ -150,7 +171,9 @@ func (p *Player) drainSpecChan() {
 
 // startSpectrumAnalyzer decodes the same source to raw mono PCM via ffmpeg
 // and FFTs it in real time, pushing 0-6 scaled bar levels to SpecChan.
-func (p *Player) startSpectrumAnalyzer(ctx context.Context, source string) {
+// startPos skips the leading portion of a local file so the analyzer stays
+// in sync with the player when resuming playback.
+func (p *Player) startSpectrumAnalyzer(ctx context.Context, source string, startPos time.Duration) {
 	const sampleRate = 22050
 	const chunkSize = 1024
 	const numBars = 32
@@ -170,6 +193,9 @@ func (p *Player) startSpectrumAnalyzer(ctx context.Context, source string) {
 	} else {
 		// Read at native 1x playback rate for local files so ffmpeg decodes in real time
 		args = append(args, "-re")
+		if startPos > 0 {
+			args = append(args, "-ss", strconv.FormatFloat(startPos.Seconds(), 'f', 3, 64))
+		}
 	}
 
 	args = append(args,

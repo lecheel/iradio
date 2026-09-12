@@ -90,7 +90,8 @@ type Model struct {
 	volumeStr    string
 	realSpectrum bool
 	eqMode       EQMode
-	musicSplit   int // 0 = 5:5 (equal) split, 1 = 3:8 (wide right) split
+	musicSplit   int            // 0 = 5:5 (equal) split, 1 = 3:8 (wide right) split
+	lastPos      map[string]int // track path -> last playback position in ms
 }
 
 // New builds the initial Model, loading favorites, hidden flags and the
@@ -123,6 +124,23 @@ func New() *Model {
 		savedMusicSplit = 0
 	}
 
+	lastPos := config.LoadIntMap("last_positions.json")
+
+	// Restore the Music-tab cursor to the last track that was played so
+	// quitting and relaunching lands on the same row the user left off on.
+	lastMusicPath := config.LoadString("last_music_track.txt")
+	musicCursor := 0
+	musicOffset := 0
+	if lastMusicPath != "" {
+		for i, t := range musicList {
+			if t.Path == lastMusicPath {
+				musicCursor = i
+				musicOffset = i
+				break
+			}
+		}
+	}
+
 	eqDB, err := eqcache.Open()
 	if err != nil {
 		eqDB = nil // playback will fall back to realtime/simulated EQ
@@ -136,11 +154,11 @@ func New() *Model {
 		cursor:       0,
 		favCursor:    0,
 		hiddenCursor: 0,
-		musicCursor:  0,
+		musicCursor:  musicCursor,
 		offset:       0,
 		favOffset:    0,
 		hiddenOffset: 0,
-		musicOffset:  0,
+		musicOffset:  musicOffset,
 		favorites:    favs,
 		hidden:       hidden,
 		musicFavs:    mFavs,
@@ -163,6 +181,7 @@ func New() *Model {
 		volumeStr:    config.SystemVolume(),
 		eqMode:       EQMode(savedEQMode),
 		musicSplit:   savedMusicSplit,
+		lastPos:      lastPos,
 	}
 	m.clampOffsets()
 	return m
@@ -178,6 +197,7 @@ func (m *Model) SetForceLiveEQ(v bool) { m.forceLiveEQ = v }
 
 // Stop shuts down audio playback and reports the stopped state over MPRIS.
 func (m *Model) Stop() {
+	m.saveMusicPosition()
 	m.player.Stop()
 	if m.eqDB != nil {
 		_ = m.eqDB.Close()
@@ -186,6 +206,29 @@ func (m *Model) Stop() {
 	if m.mprisSvc != nil {
 		m.mprisSvc.Update("Stopped", nil)
 	}
+}
+
+// saveMusicPosition persists the current music track's playback offset so
+// the next launch (or re-selection) can resume from where the user left off.
+// Positions under one second and positions within the final second of a
+// track are pruned so restarting is intuitive.
+func (m *Model) saveMusicPosition() {
+	if !m.isMusic || m.musicPlaying < 0 || m.musicPlaying >= len(m.musicTracks) {
+		return
+	}
+	if m.lastPos == nil {
+		m.lastPos = make(map[string]int)
+	}
+	t := m.musicTracks[m.musicPlaying]
+	pos := int(time.Since(m.trackStart).Milliseconds())
+	if pos < 1000 {
+		delete(m.lastPos, t.Path)
+	} else if t.Duration > 0 && time.Duration(pos)*time.Millisecond >= t.Duration-time.Second {
+		delete(m.lastPos, t.Path)
+	} else {
+		m.lastPos[t.Path] = pos
+	}
+	config.SaveIntMap("last_positions.json", m.lastPos)
 }
 
 func (m *Model) getAndResetCount() int {
@@ -931,7 +974,22 @@ func (m *Model) playMusicTrack(idx int) {
 	if idx < 0 || idx >= len(m.musicTracks) {
 		return
 	}
+	// Persist the outgoing track's position before switching tracks.
+	m.saveMusicPosition()
+
 	t := &m.musicTracks[idx]
+
+	// Resume from the last saved position when it is meaningful. Skip if
+	// the offset sits within the closing second of a known-duration track.
+	var resumePos time.Duration
+	if m.lastPos != nil {
+		if ms, ok := m.lastPos[t.Path]; ok && ms > 0 {
+			resumePos = time.Duration(ms) * time.Millisecond
+			if t.Duration > 0 && resumePos >= t.Duration-time.Second {
+				resumePos = 0
+			}
+		}
+	}
 
 	// Look up precomputed EQ first. If we have it, we can skip both the
 	// realtime ffmpeg FFT and the ffprobe duration probe. When --eq is in
@@ -961,9 +1019,9 @@ func (m *Model) playMusicTrack(idx int) {
 
 	var err error
 	if cached != nil {
-		err = m.player.Play(t.Path, audio.WithoutAnalyzer())
+		err = m.player.Play(t.Path, audio.WithoutAnalyzer(), audio.WithStartPosition(resumePos))
 	} else {
-		err = m.player.Play(t.Path)
+		err = m.player.Play(t.Path, audio.WithStartPosition(resumePos))
 	}
 	if err != nil {
 		m.statusMsg = fmt.Sprintf("Audio Error: %v", err)
@@ -978,17 +1036,35 @@ func (m *Model) playMusicTrack(idx int) {
 	m.isPlaying = true
 	m.isMusic = true
 	m.musicPlaying = idx
+	m.musicCursor = idx
 	m.playingIdx = -1
 	config.SaveInt("last_tab.json", 2)
-	m.trackStart = time.Now()
-	m.trackElapsed = 0
-	switch {
-	case cached != nil:
-		m.statusMsg = fmt.Sprintf("Playing track (cached EQ): %s", t.Filename)
-	case m.forceLiveEQ:
-		m.statusMsg = fmt.Sprintf("Playing track (live EQ): %s", t.Filename)
-	default:
-		m.statusMsg = fmt.Sprintf("Playing track: %s", t.Filename)
+	// Persist the track that is now playing so the Music cursor is restored
+	// to this row on the next launch (see New).
+	config.SaveString("last_music_track.txt", t.Path)
+	// Anchor trackStart in the past so time.Since(trackStart) already
+	// includes the resumed offset, keeping the EQ cache index, lyrics
+	// highlighter and progress bar all consistent.
+	m.trackStart = time.Now().Add(-resumePos)
+	m.trackElapsed = resumePos
+	if resumePos > 0 {
+		switch {
+		case cached != nil:
+			m.statusMsg = fmt.Sprintf("Resumed (cached EQ) at %02d:%02d: %s",
+				int(resumePos.Minutes()), int(resumePos.Seconds())%60, t.Filename)
+		default:
+			m.statusMsg = fmt.Sprintf("Resumed at %02d:%02d: %s",
+				int(resumePos.Minutes()), int(resumePos.Seconds())%60, t.Filename)
+		}
+	} else {
+		switch {
+		case cached != nil:
+			m.statusMsg = fmt.Sprintf("Playing track (cached EQ): %s", t.Filename)
+		case m.forceLiveEQ:
+			m.statusMsg = fmt.Sprintf("Playing track (live EQ): %s", t.Filename)
+		default:
+			m.statusMsg = fmt.Sprintf("Playing track: %s", t.Filename)
+		}
 	}
 	if m.mprisSvc != nil {
 		m.mprisSvc.UpdateMusic("Playing", t)

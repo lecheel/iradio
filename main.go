@@ -128,16 +128,22 @@ INTERACTIVE TUI KEYBINDINGS:
   r                    Rescan ~/Music for audio files
   Tab / F1-F3          Switch tabs: Stations, Favorites, Music
   F5                   Toggle Music tab layout between 5:5 and 3:8 split
+
+  Local tracks remember their last playback position: pausing, skipping or
+  quitting stores the current offset (in ~/.config/iradio/last_positions.json)
+  and the next play resumes from there. Finished tracks restart from 0:00.
   j / k, ↑ / ↓         Move down / up (supports [count]j, e.g. 3j)
   J / K                Jump to next / previous country section
   gg / G               Jump to first / last item
   ? / Esc              Toggle / close the in-app help popup
   q / Ctrl+c           Quit
 
-FILES:
-  Config    ~/.config/iradio/   (favorites.json, hidden.json,
-                                 music_favorites.json, eq_mode.json,
-                                 last_tab.json, stations.json)
+  FILES:
+    Config    ~/.config/iradio/   (favorites.json, hidden.json,
+                                   music_favorites.json, eq_mode.json,
+                                   last_tab.json, last_positions.json,
+                                   last_music_track.txt, music_split.json,
+                                   stations.json)
   Cache     ~/.cache/iradio/    (eq.sqlite)
   Music     ~/Music/            (*.mp3, *.flac, *.m4a, *.wav, *.ogg,
                                  plus sidecar *.lrc lyric files)
