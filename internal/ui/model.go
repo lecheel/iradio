@@ -11,6 +11,7 @@ import (
 
 	"iradio/internal/audio"
 	"iradio/internal/config"
+	"iradio/internal/eqcache"
 	"iradio/internal/mpris"
 	"iradio/internal/music"
 	"iradio/internal/stations"
@@ -57,6 +58,8 @@ type Model struct {
 	showHidden   bool
 	player       *audio.Player
 	mprisSvc     *mpris.Service
+	eqDB         *eqcache.DB
+	cachedEQ     *eqcache.CachedEQ
 	playingIdx   int // index in stations.All, or -1 if stopped
 	isPlaying    bool
 	isMusic      bool
@@ -89,7 +92,15 @@ func New() *Model {
 		status = fmt.Sprintf("Scanned %d tracks from ~/Music", len(musicList))
 	}
 
+	eqDB, err := eqcache.Open()
+	if err != nil {
+		eqDB = nil // playback will fall back to realtime/simulated EQ
+	} else if eqDB.Count() > 0 && status == "" {
+		status = fmt.Sprintf("EQ cache: %d track(s) ready", eqDB.Count())
+	}
+
 	return &Model{
+		eqDB:         eqDB,
 		activeTab:    0,
 		cursor:       0,
 		favCursor:    0,
@@ -126,6 +137,10 @@ func (m *Model) SetService(s *mpris.Service) { m.mprisSvc = s }
 // Stop shuts down audio playback and reports the stopped state over MPRIS.
 func (m *Model) Stop() {
 	m.player.Stop()
+	if m.eqDB != nil {
+		_ = m.eqDB.Close()
+		m.eqDB = nil
+	}
 	if m.mprisSvc != nil {
 		m.mprisSvc.Update("Stopped", nil)
 	}
@@ -357,7 +372,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		if m.isPlaying {
 			m.artFrame++
-			if !m.realSpectrum {
+			if m.isMusic && m.cachedEQ != nil {
+				// Precomputed EQ frames from the sqlite cache: no ffmpeg
+				// decoding happens at playtime, we just index by elapsed
+				// time and copy into the bar array.
+				ms := int(time.Since(m.trackStart).Milliseconds())
+				if bars := m.cachedEQ.BarsAt(ms); bars != nil {
+					n := minInt(len(bars), len(m.bars))
+					copy(m.bars, bars[:n])
+				}
+			} else if !m.realSpectrum {
 				for i := range m.bars {
 					r := rand.Intn(100)
 					switch {
@@ -739,20 +763,39 @@ func (m *Model) playMusicTrack(idx int) {
 		return
 	}
 	t := &m.musicTracks[idx]
+
+	// Look up precomputed EQ first. If we have it, we can skip both the
+	// realtime ffmpeg FFT and the ffprobe duration probe.
+	var cached *eqcache.CachedEQ
+	if m.eqDB != nil {
+		cached = m.eqDB.Lookup(t.Path)
+	}
+	m.cachedEQ = cached
+
 	if t.Duration == 0 {
-		go func(path string, index int) {
-			d := music.ProbeDuration(path)
-			if d > 0 && index < len(m.musicTracks) {
-				m.musicTracks[index].Duration = d
-			}
-		}(t.Path, idx)
+		if cached != nil && cached.DurationMs > 0 {
+			t.Duration = time.Duration(cached.DurationMs) * time.Millisecond
+		} else {
+			go func(path string, index int) {
+				d := music.ProbeDuration(path)
+				if d > 0 && index < len(m.musicTracks) {
+					m.musicTracks[index].Duration = d
+				}
+			}(t.Path, idx)
+		}
 	}
 
-	err := m.player.Play(t.Path)
+	var err error
+	if cached != nil {
+		err = m.player.Play(t.Path, audio.WithoutAnalyzer())
+	} else {
+		err = m.player.Play(t.Path)
+	}
 	if err != nil {
 		m.statusMsg = fmt.Sprintf("Audio Error: %v", err)
 		m.isPlaying = false
 		m.isMusic = false
+		m.cachedEQ = nil
 		return
 	}
 
@@ -762,7 +805,11 @@ func (m *Model) playMusicTrack(idx int) {
 	m.playingIdx = -1
 	m.trackStart = time.Now()
 	m.trackElapsed = 0
-	m.statusMsg = fmt.Sprintf("Playing track: %s", t.Filename)
+	if cached != nil {
+		m.statusMsg = fmt.Sprintf("Playing track (cached EQ): %s", t.Filename)
+	} else {
+		m.statusMsg = fmt.Sprintf("Playing track: %s", t.Filename)
+	}
 	if m.mprisSvc != nil {
 		m.mprisSvc.UpdateMusic("Playing", t)
 	}
@@ -776,6 +823,7 @@ func (m *Model) togglePlayMusic() {
 		m.player.Stop()
 		m.isPlaying = false
 		m.isMusic = false
+		m.cachedEQ = nil
 		m.statusMsg = fmt.Sprintf("Stopped: %s", m.musicTracks[m.musicCursor].Filename)
 		if m.mprisSvc != nil {
 			m.mprisSvc.UpdateMusic("Stopped", nil)
@@ -844,6 +892,7 @@ func (m *Model) togglePlay() {
 	m.isMusic = false
 	m.musicPlaying = -1
 	m.playingIdx = targetIdx
+	m.cachedEQ = nil
 	m.statusMsg = fmt.Sprintf("Playing live: [%s] %s", target.Region, target.NameEn)
 	if m.mprisSvc != nil {
 		m.mprisSvc.Update("Playing", target)
@@ -874,6 +923,8 @@ func (m *Model) selectNextStation() {
 	}
 	_ = m.player.Play(st.StreamURL)
 	m.isPlaying = true
+	m.isMusic = false
+	m.cachedEQ = nil
 	if m.mprisSvc != nil {
 		m.mprisSvc.Update("Playing", st)
 	}
@@ -903,6 +954,8 @@ func (m *Model) selectPrevStation() {
 	}
 	_ = m.player.Play(st.StreamURL)
 	m.isPlaying = true
+	m.isMusic = false
+	m.cachedEQ = nil
 	if m.mprisSvc != nil {
 		m.mprisSvc.Update("Playing", st)
 	}

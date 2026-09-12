@@ -68,8 +68,27 @@ func resolveStreamURL(u string) string {
 	return u
 }
 
+// PlayOption customises a Play call.
+type PlayOption func(*playOptions)
+
+type playOptions struct {
+	skipAnalyzer bool
+}
+
+// WithoutAnalyzer disables the realtime ffmpeg spectrum analyzer. Use this
+// when precomputed EQ frames (from internal/eqcache) will drive the UI
+// instead, so we don't spin up a second ffmpeg decoding process at playtime.
+func WithoutAnalyzer() PlayOption {
+	return func(o *playOptions) { o.skipAnalyzer = true }
+}
+
 // Play starts playback of the given URL (stream or local file).
-func (p *Player) Play(url string) error {
+func (p *Player) Play(url string, opts ...PlayOption) error {
+	var po playOptions
+	for _, opt := range opts {
+		opt(&po)
+	}
+
 	p.Stop()
 	url = resolveStreamURL(url)
 
@@ -95,7 +114,7 @@ func (p *Player) Play(url string) error {
 		return err
 	}
 
-	if p.SpecChan != nil && HasFFmpeg() {
+	if !po.skipAnalyzer && p.SpecChan != nil && HasFFmpeg() {
 		p.startSpectrumAnalyzer(ctx, url)
 	}
 
