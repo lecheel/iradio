@@ -318,13 +318,6 @@ func (m *Model) renderMainView() string {
 }
 
 func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight int) string {
-	playerState := "stopped"
-	if m.isPlaying && m.isMusic {
-		playerState = "playing"
-	}
-	topContent := fmt.Sprintf("State: %s • Volume: %s [System (ALSA)]", playerState, m.volumeStr)
-	topBox := titledPanel("Terminal Music Player", topContent, contentWidth-2, 0, colorCyan)
-
 	innerWidth := contentWidth - 5
 	if innerWidth < 40 {
 		innerWidth = 40
@@ -511,42 +504,74 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 		spectrumRows = 3
 	}
 
+	// Calculate how many spectrum columns fit across the full width of the right panel
 	availBarCols := rightWidth - 4
-	barCount := len(m.bars)
-	if availBarCols/2 < barCount {
-		barCount = availBarCols / 2
+	if availBarCols < 7 {
+		availBarCols = 7
 	}
-	if barCount < 4 {
-		barCount = 4
+	targetBars := (availBarCols + 1) / 2
+	if targetBars < 4 {
+		targetBars = 4
 	}
-	if barCount > len(m.bars) {
-		barCount = len(m.bars)
+
+	// Resample the 32 frequency bands across targetBars to seamlessly fill
+	// the entire panel width when the terminal is enlarged or full screen.
+	dispBars := make([]float64, targetBars)
+	dispPeaks := make([]float64, targetBars)
+	srcLen := len(m.bars)
+	for b := 0; b < targetBars; b++ {
+		var srcPos float64
+		if targetBars > 1 {
+			srcPos = float64(b) * float64(srcLen-1) / float64(targetBars-1)
+		}
+		idx := int(srcPos)
+		frac := srcPos - float64(idx)
+		if idx >= srcLen-1 {
+			dispBars[b] = float64(m.bars[srcLen-1])
+			if srcLen-1 < len(m.peaks) {
+				dispPeaks[b] = m.peaks[srcLen-1]
+			}
+		} else {
+			dispBars[b] = float64(m.bars[idx])*(1.0-frac) + float64(m.bars[idx+1])*frac
+			p0, p1 := 0.0, 0.0
+			if idx < len(m.peaks) {
+				p0 = m.peaks[idx]
+			}
+			if idx+1 < len(m.peaks) {
+				p1 = m.peaks[idx+1]
+			}
+			dispPeaks[b] = p0*(1.0-frac) + p1*frac
+		}
 	}
-	bars := m.bars[:barCount]
 
 	const barMax = 6
 	const spectrumMinHz = 40.0
 	const spectrumMaxHz = 11025.0
-	const spectrumTotalBars = 32
 
-	peak, sum := 0, 0
-	for _, v := range bars {
-		if v > peak {
-			peak = v
+	peakVal, sumVal := 0.0, 0.0
+	for _, v := range dispBars {
+		if v > peakVal {
+			peakVal = v
 		}
-		sum += v
+		sumVal += v
 	}
-	avg := 0
-	if len(bars) > 0 {
-		avg = sum / len(bars)
+	avgVal := 0.0
+	if len(dispBars) > 0 {
+		avgVal = sumVal / float64(len(dispBars))
 	}
 
-	meterW := (rightWidth - 14) / 2
+	baseW := targetBars*2 - 1
+	if baseW < 1 {
+		baseW = 1
+	}
+
+	// Symmetrical stereo meters matched to the exact width of the spectrum baseline
+	meterW := (baseW - 5) / 2
 	if meterW < 6 {
 		meterW = 6
 	}
-	renderMeter := func(level int, c lipgloss.Color) string {
-		filled := level * meterW / barMax
+	renderMeter := func(level float64, c lipgloss.Color) string {
+		filled := int(math.Round(level * float64(meterW) / float64(barMax)))
 		if filled > meterW {
 			filled = meterW
 		}
@@ -558,9 +583,9 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	}
 	stereoLine := "  " +
 		lipgloss.NewStyle().Foreground(colorSubtext).Bold(true).Render("L ") +
-		renderMeter(avg, colorGreen) + " " +
+		renderMeter(avgVal, colorGreen) + " " +
 		lipgloss.NewStyle().Foreground(colorSubtext).Bold(true).Render("R ") +
-		renderMeter(peak, colorCyan)
+		renderMeter(peakVal, colorCyan)
 
 	activeGlyph := "▄"
 	offGlyph := "▄"
@@ -606,12 +631,13 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 
 		var sb strings.Builder
 		sb.WriteString("  ")
-		for i, v := range bars {
-			filledHeight := v * spectrumRows / barMax
+		for i := 0; i < targetBars; i++ {
+			v := dispBars[i]
+			filledHeight := int(math.Round(v * float64(spectrumRows) / float64(barMax)))
 
 			peakRow := -1
-			if i < len(m.peaks) && m.peaks[i] > 0 {
-				peakRow = int(m.peaks[i]*float64(spectrumRows)/float64(barMax) + 0.5)
+			if dispPeaks[i] > 0 {
+				peakRow = int(dispPeaks[i]*float64(spectrumRows)/float64(barMax) + 0.5)
 				if peakRow > spectrumRows-1 {
 					peakRow = spectrumRows - 1
 				}
@@ -635,17 +661,13 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 			default:
 				sb.WriteString(offStyle.Render(offGlyph))
 			}
-			if i < len(bars)-1 {
+			if i < targetBars-1 {
 				sb.WriteString(" ")
 			}
 		}
 		spectrumLines = append(spectrumLines, sb.String())
 	}
 
-	baseW := barCount*2 - 1
-	if baseW < 1 {
-		baseW = 1
-	}
 	baseline := "  " + lipgloss.NewStyle().Foreground(colorSubtext).Render(strings.Repeat("▀", baseW))
 
 	freqPoints := []struct {
@@ -653,7 +675,7 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 		label string
 	}{
 		{50, "50"}, {100, "100"}, {250, "250"}, {500, "500"},
-		{1000, "1k"}, {2000, "2k"}, {4000, "4k"}, {8000, "8k"}, {16000, "16k"},
+		{1000, "1k"}, {2000, "2k"}, {4000, "4k"}, {8000, "8k"}, {10000, "10k"},
 	}
 	logMin := math.Log10(spectrumMinHz)
 	logMax := math.Log10(spectrumMaxHz)
@@ -664,8 +686,8 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 		if fp.hz < spectrumMinHz || fp.hz > spectrumMaxHz {
 			continue
 		}
-		bin := int((math.Log10(fp.hz)-logMin)/(logMax-logMin)*spectrumTotalBars + 0.5)
-		if bin >= barCount {
+		bin := int((math.Log10(fp.hz)-logMin)/(logMax-logMin)*float64(targetBars) + 0.5)
+		if bin >= targetBars {
 			continue
 		}
 		col := bin * 2
@@ -698,6 +720,7 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 		status = "◌ IDLE"
 		statusColor = colorSubtext
 	}
+
 	modeTag := "BAR"
 	switch m.eqMode {
 	case EQModeDotBar:
@@ -711,8 +734,7 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	infoLine := "  " +
 		lipgloss.NewStyle().Foreground(statusColor).Bold(true).Render(status) +
 		lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render("  ["+modeTag+"]") +
-		lipgloss.NewStyle().Foreground(colorSubtext).Render(fmt.Sprintf("  Peak %d/%d", peak, barMax))
-
+		lipgloss.NewStyle().Foreground(colorSubtext).Render(fmt.Sprintf("  Peak %d/%d", int(math.Round(peakVal)), barMax))
 	eqLines := make([]string, 0, artInner)
 	eqLines = append(eqLines, stereoLine)
 	eqLines = append(eqLines, spectrumLines...)
@@ -746,7 +768,6 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 		"",
 		tabsRow,
 		"",
-		topBox,
 		mainSplit,
 		"",
 		footer,
