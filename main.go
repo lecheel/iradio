@@ -120,7 +120,7 @@ EQ MODES:
 
 INTERACTIVE TUI KEYBINDINGS:
   Enter / Space        Play / stop the selected station or track
-  t                    Toggle LED equalizer mode (Bar / Dot / Circle)
+  t                    Toggle LED equalizer mode (Bar / Dot Bar / Dot / Circle)
   n / p                Next / previous track or station
   f                    Toggle station / track in Favorites
   d                    Hide (or restore) the selected radio station
@@ -135,7 +135,8 @@ INTERACTIVE TUI KEYBINDINGS:
 
 FILES:
   Config    ~/.config/iradio/   (favorites.json, hidden.json,
-                                 music_favorites.json, stations.json)
+                                 music_favorites.json, eq_mode.json,
+                                 stations.json)
   Cache     ~/.cache/iradio/    (eq.sqlite)
   Music     ~/Music/            (*.mp3, *.flac, *.m4a, *.wav, *.ogg,
                                  plus sidecar *.lrc lyric files)

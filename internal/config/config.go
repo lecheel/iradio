@@ -40,6 +40,29 @@ func SaveBoolMap(name string, m map[string]bool) {
 	}
 }
 
+// LoadInt reads an integer value from the config directory, returning fallback on error.
+func LoadInt(name string, fallback int) int {
+	data, err := os.ReadFile(path(name))
+	if err != nil {
+		return fallback
+	}
+	var val int
+	if err := json.Unmarshal(data, &val); err == nil {
+		return val
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+		return n
+	}
+	return fallback
+}
+
+// SaveInt writes an integer value as JSON to the config directory.
+func SaveInt(name string, val int) {
+	if data, err := json.Marshal(val); err == nil {
+		_ = os.WriteFile(path(name), data, 0644)
+	}
+}
+
 // WriteExampleStations writes a starter stations.example.json if none exists.
 func WriteExampleStations() {
 	exampleFile := path("stations.example.json")

@@ -47,7 +47,7 @@ func (m Model) renderHelpBox() string {
 		row("Enter / Space", "Play / Stop selected station / track"),
 		row("n / p", "Next / Previous track or station"),
 		row("f", "Toggle station / track in Favorites"),
-		row("t", "Toggle EQ display mode (Bar / Dot / Circle)"),
+		row("t", "Toggle EQ display mode (Bar / Dot Bar / Dot / Circle)"),
 		row("d", "Hide non-working radio station / restore"),
 		row("H", "Toggle viewing hidden radio stations"),
 		row("r", "Rescan ~/Music directory for audio files"),
@@ -247,7 +247,7 @@ func (m *Model) renderMainView() string {
 	// 4. Now Playing / EQ Panel
 	var eqBar strings.Builder
 	eqChars := []string{" ", " ", "▂", "▃", "▄", "▅", "▆", "▇"}
-	if m.eqMode == EQModeDot {
+	if m.eqMode == EQModeDot || m.eqMode == EQModeDotBar {
 		eqChars = []string{" ", "·", "•", "•", "•", "•", "•", "•"}
 	} else if m.eqMode == EQModeCircle {
 		eqChars = []string{" ", "·", "•", "•", "●", "●", "●", "●"}
@@ -566,6 +566,10 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	offGlyph := "▄"
 	peakGlyph := "▄"
 	switch m.eqMode {
+	case EQModeDotBar:
+		activeGlyph = "•"
+		offGlyph = "·"
+		peakGlyph = "•"
 	case EQModeDot:
 		activeGlyph = "•"
 		offGlyph = "·"
@@ -575,6 +579,8 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 		offGlyph = "·"
 		peakGlyph = "●"
 	}
+
+	isBarStyle := (m.eqMode == EQModeBar || m.eqMode == EQModeDotBar)
 
 	peakStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
 	var spectrumLines []string
@@ -613,15 +619,16 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 
 			isPeak := (rowFromBottom == peakRow && peakRow >= 0)
 			var isLevel bool
-			if m.eqMode == EQModeBar {
+			if isBarStyle {
+				// Filled column up to the current level
 				isLevel = (filledHeight > rowFromBottom)
 			} else {
-				// Dot and Circle modes: light only the top segment of the current level
+				// Single floating dot mode
 				isLevel = (filledHeight > 0 && rowFromBottom == filledHeight-1)
 			}
 
 			switch {
-			case isPeak && (!isLevel || m.eqMode != EQModeBar):
+			case isPeak && (!isLevel || !isBarStyle):
 				sb.WriteString(peakStyle.Render(peakGlyph))
 			case isLevel:
 				sb.WriteString(onStyle.Render(activeGlyph))
@@ -693,6 +700,8 @@ func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight 
 	}
 	modeTag := "BAR"
 	switch m.eqMode {
+	case EQModeDotBar:
+		modeTag = "DOT BAR"
 	case EQModeDot:
 		modeTag = "DOT"
 	case EQModeCircle:

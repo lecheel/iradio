@@ -43,9 +43,10 @@ func waitForSpectrum(ch chan []int) tea.Cmd {
 type EQMode int
 
 const (
-	EQModeBar    EQMode = iota // solid vertical columns
-	EQModeDot                  // floating dots using real "•"
-	EQModeCircle               // floating round dots using "●"
+	EQModeBar    EQMode = iota // solid vertical block columns (▄)
+	EQModeDotBar               // filled columns of dots (•)
+	EQModeDot                  // floating single dots (•)
+	EQModeCircle               // floating round dots (●)
 )
 
 // Model is the top-level Bubble Tea application state.
@@ -106,6 +107,11 @@ func New() *Model {
 		status = fmt.Sprintf("Scanned %d tracks from ~/Music", len(musicList))
 	}
 
+	savedEQMode := config.LoadInt("eq_mode.json", 0)
+	if savedEQMode < 0 || savedEQMode > int(EQModeCircle) {
+		savedEQMode = 0
+	}
+
 	eqDB, err := eqcache.Open()
 	if err != nil {
 		eqDB = nil // playback will fall back to realtime/simulated EQ
@@ -144,7 +150,7 @@ func New() *Model {
 		pendingTabID: 0,
 		showHelp:     false,
 		volumeStr:    config.SystemVolume(),
-		eqMode:       EQModeBar,
+		eqMode:       EQMode(savedEQMode),
 	}
 }
 
@@ -734,10 +740,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "t":
 			m.pendingTabID++
 			m.countBuffer = ""
-			m.eqMode = (m.eqMode + 1) % 3
+			m.eqMode = (m.eqMode + 1) % 4
+			config.SaveInt("eq_mode.json", int(m.eqMode))
 			switch m.eqMode {
 			case EQModeBar:
-				m.statusMsg = "EQ Mode: Bar (solid columns)"
+				m.statusMsg = "EQ Mode: Block Bar (solid ▄ columns)"
+			case EQModeDotBar:
+				m.statusMsg = "EQ Mode: Dot Bar (filled • columns)"
 			case EQModeDot:
 				m.statusMsg = "EQ Mode: Dot (floating • dots)"
 			case EQModeCircle:
