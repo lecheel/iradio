@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,10 +13,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -552,6 +558,285 @@ func (m *MPRISService) Update(status string, s *Station) {
 	m.properties.Set("org.mpris.MediaPlayer2.Player", "Metadata", dbus.MakeVariant(meta))
 }
 
+func (m *MPRISService) UpdateMusic(status string, t *MusicTrack) {
+	if !m.active || m.properties == nil {
+		return
+	}
+	m.properties.Set("org.mpris.MediaPlayer2.Player", "PlaybackStatus", dbus.MakeVariant(status))
+	meta := map[string]dbus.Variant{}
+	if t != nil {
+		meta["mpris:trackid"] = dbus.MakeVariant(dbus.ObjectPath("/org/mpris/MediaPlayer2/track/music"))
+		meta["xesam:title"] = dbus.MakeVariant(t.Title)
+		meta["xesam:artist"] = dbus.MakeVariant([]string{t.Artist})
+		meta["xesam:album"] = dbus.MakeVariant(t.Album)
+	}
+	m.properties.Set("org.mpris.MediaPlayer2.Player", "Metadata", dbus.MakeVariant(meta))
+}
+
+// -----------------------------------------------------------------------------
+// Local Music Library (~/Music) & Lyrics
+// -----------------------------------------------------------------------------
+
+type LyricLine struct {
+	Time time.Duration
+	Text string
+}
+
+type MusicTrack struct {
+	Path     string
+	Filename string
+	Title    string
+	Artist   string
+	Album    string
+	Duration time.Duration
+	Lyrics   []LyricLine
+}
+
+func parseLRCFile(lrcPath string) []LyricLine {
+	b, err := os.ReadFile(lrcPath)
+	if err != nil {
+		return nil
+	}
+	var lines []LyricLine
+	re := regexp.MustCompile(`\[(\d+):(\d+(?:\.\d+)?)\](.*)`)
+	scanner := bufio.NewScanner(bytes.NewReader(b))
+	for scanner.Scan() {
+		line := scanner.Text()
+		matches := re.FindAllStringSubmatch(line, -1)
+		for _, m := range matches {
+			min, _ := strconv.Atoi(m[1])
+			sec, _ := strconv.ParseFloat(m[2], 64)
+			d := time.Duration(min)*time.Minute + time.Duration(sec*float64(time.Second))
+			text := strings.TrimSpace(m[3])
+			lines = append(lines, LyricLine{Time: d, Text: text})
+		}
+	}
+	sort.Slice(lines, func(i, j int) bool {
+		return lines[i].Time < lines[j].Time
+	})
+	return lines
+}
+
+func probeDuration(path string) time.Duration {
+	cmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path)
+	out, err := cmd.Output()
+	if err == nil {
+		secs, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+		if err == nil && secs > 0 {
+			return time.Duration(secs * float64(time.Second))
+		}
+	}
+	return 0
+}
+
+func decodeID3Text(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	enc := data[0]
+	raw := data[1:]
+	switch enc {
+	case 1: // UTF-16 with BOM
+		if len(raw) < 2 {
+			return ""
+		}
+		var isBigEndian bool
+		if raw[0] == 0xFE && raw[1] == 0xFF {
+			isBigEndian = true
+			raw = raw[2:]
+		} else if raw[0] == 0xFF && raw[1] == 0xFE {
+			isBigEndian = false
+			raw = raw[2:]
+		}
+		u16s := make([]uint16, len(raw)/2)
+		for i := 0; i < len(u16s); i++ {
+			if isBigEndian {
+				u16s[i] = binary.BigEndian.Uint16(raw[i*2:])
+			} else {
+				u16s[i] = binary.LittleEndian.Uint16(raw[i*2:])
+			}
+		}
+		return strings.TrimRight(string(utf16.Decode(u16s)), "\x00")
+	default:
+		return strings.TrimRight(string(raw), "\x00")
+	}
+}
+
+func parseID3(path string) (title, artist, album string, dur time.Duration) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	head := make([]byte, 10)
+	if _, err := io.ReadFull(f, head); err == nil && string(head[:3]) == "ID3" {
+		size := int(head[6])<<21 | int(head[7])<<14 | int(head[8])<<7 | int(head[9])
+		tagBuf := make([]byte, size)
+		if _, err := io.ReadFull(f, tagBuf); err == nil {
+			pos := 0
+			for pos+10 <= len(tagBuf) {
+				frameID := string(tagBuf[pos : pos+4])
+				if tagBuf[pos] == 0 {
+					break
+				}
+				frameSize := int(binary.BigEndian.Uint32(tagBuf[pos+4 : pos+8]))
+				if frameSize <= 0 || pos+10+frameSize > len(tagBuf) {
+					break
+				}
+				frameData := tagBuf[pos+10 : pos+10+frameSize]
+				pos += 10 + frameSize
+
+				switch frameID {
+				case "TIT2":
+					title = decodeID3Text(frameData)
+				case "TPE1":
+					artist = decodeID3Text(frameData)
+				case "TALB":
+					album = decodeID3Text(frameData)
+				case "TLEN":
+					txt := decodeID3Text(frameData)
+					if ms, err := strconv.Atoi(strings.TrimSpace(txt)); err == nil && ms > 0 {
+						dur = time.Duration(ms) * time.Millisecond
+					}
+				}
+			}
+		}
+	}
+	return
+}
+
+func loadMusicTracks() []MusicTrack {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.Getenv("HOME")
+	}
+	musicDir := filepath.Join(home, "Music")
+	_ = os.MkdirAll(musicDir, 0755)
+
+	var list []MusicTrack
+	exts := map[string]bool{".mp3": true, ".flac": true, ".m4a": true, ".wav": true, ".ogg": true}
+
+	_ = filepath.Walk(musicDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if !exts[ext] {
+			return nil
+		}
+
+		fname := filepath.Base(path)
+		title, artist, album, dur := parseID3(path)
+
+		cleanName := strings.TrimSuffix(fname, filepath.Ext(fname))
+		if title == "" || artist == "" {
+			if strings.Contains(cleanName, "_") {
+				parts := strings.Split(cleanName, "_")
+				if len(parts) >= 3 {
+					if artist == "" {
+						artist = parts[1]
+					}
+					if title == "" {
+						title = strings.Join(parts[2:], " ")
+					}
+					if album == "" {
+						album = parts[len(parts)-1]
+					}
+				} else if len(parts) == 2 {
+					if artist == "" {
+						artist = parts[0]
+					}
+					if title == "" {
+						title = parts[1]
+					}
+				}
+			} else if strings.Contains(cleanName, "-") {
+				parts := strings.Split(cleanName, "-")
+				if artist == "" {
+					artist = strings.TrimSpace(parts[0])
+				}
+				if title == "" {
+					title = strings.TrimSpace(parts[1])
+				}
+			}
+		}
+		if title == "" {
+			title = cleanName
+		}
+		if artist == "" {
+			artist = "Unknown Artist"
+		}
+		if album == "" {
+			album = "Local Music"
+		}
+
+		lrcPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".lrc"
+		var lyrics []LyricLine
+		if _, err := os.Stat(lrcPath); err == nil {
+			lyrics = parseLRCFile(lrcPath)
+		}
+
+		list = append(list, MusicTrack{
+			Path:     path,
+			Filename: fname,
+			Title:    title,
+			Artist:   artist,
+			Album:    album,
+			Duration: dur,
+			Lyrics:   lyrics,
+		})
+		return nil
+	})
+
+	sort.Slice(list, func(i, j int) bool {
+		return strings.ToLower(list[i].Filename) < strings.ToLower(list[j].Filename)
+	})
+
+	return list
+}
+
+func getSystemVolume() string {
+	if out, err := exec.Command("amixer", "sget", "Master").Output(); err == nil {
+		s := string(out)
+		if idx := strings.Index(s, "["); idx != -1 {
+			if end := strings.Index(s[idx:], "%]"); end != -1 {
+				return s[idx+1 : idx+end+1]
+			}
+		}
+	}
+	if out, err := exec.Command("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@").Output(); err == nil {
+		fields := strings.Fields(string(out))
+		if len(fields) >= 2 {
+			if v, err := strconv.ParseFloat(fields[1], 64); err == nil {
+				return fmt.Sprintf("%d%%", int(v*100))
+			}
+		}
+	}
+	return "63%"
+}
+
+func getMusicFavFilePath() string {
+	dir := ensureConfigDir()
+	return filepath.Join(dir, "music_favorites.json")
+}
+
+func loadMusicFavorites() map[string]bool {
+	favs := make(map[string]bool)
+	data, err := os.ReadFile(getMusicFavFilePath())
+	if err == nil {
+		_ = json.Unmarshal(data, &favs)
+	}
+	return favs
+}
+
+func saveMusicFavorites(favs map[string]bool) {
+	data, err := json.MarshalIndent(favs, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(getMusicFavFilePath(), data, 0644)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Bubble Tea TUI Model
 // -----------------------------------------------------------------------------
@@ -607,25 +892,34 @@ func clampOffset(cursor, offset, count, visibleHeight int) int {
 type Model struct {
 	width        int
 	height       int
-	activeTab    int // 0 = Stations, 1 = Favorites
+	activeTab    int // 0 = Stations, 1 = Favorites, 2 = Music Library
 	cursor       int
 	favCursor    int
 	hiddenCursor int
+	musicCursor  int
 	offset       int
 	favOffset    int
 	hiddenOffset int
+	musicOffset  int
 	favorites    map[string]bool
 	hidden       map[string]bool
+	musicFavs    map[string]bool
 	showHidden   bool
 	audio        *AudioPlayer
 	mpris        *MPRISService
 	playingIdx   int // index in allStations, or -1 if stopped
 	isPlaying    bool
+	isMusic      bool
+	musicTracks  []MusicTrack
+	musicPlaying int
+	trackStart   time.Time
+	trackElapsed time.Duration
 	statusMsg    string
 	bars         []int
 	countBuffer  string
 	pendingTabID int
 	showHelp     bool
+	volumeStr    string
 }
 
 func (m *Model) getAndResetCount() int {
@@ -817,15 +1111,24 @@ func (m *Model) clampOffsets() {
 		m.hiddenCursor = len(hiddenList) - 1
 	}
 	m.hiddenOffset = clampOffset(m.hiddenCursor, m.hiddenOffset, len(hiddenList), listH)
+
+	if len(m.musicTracks) > 0 && m.musicCursor >= len(m.musicTracks) {
+		m.musicCursor = len(m.musicTracks) - 1
+	}
+	m.musicOffset = clampOffset(m.musicCursor, m.musicOffset, len(m.musicTracks), listH)
 }
 
 func initialModel() Model {
 	favs := loadFavorites()
 	hidden := loadHidden()
 	customCount := initCustomStations()
+	musicList := loadMusicTracks()
+	mFavs := loadMusicFavorites()
 	status := ""
 	if customCount > 0 {
-		status = fmt.Sprintf("Loaded %d custom station(s) from config", customCount)
+		status = fmt.Sprintf("Loaded %d custom station(s)", customCount)
+	} else if len(musicList) > 0 {
+		status = fmt.Sprintf("Scanned %d tracks from ~/Music", len(musicList))
 	}
 
 	return Model{
@@ -833,20 +1136,27 @@ func initialModel() Model {
 		cursor:       0,
 		favCursor:    0,
 		hiddenCursor: 0,
+		musicCursor:  0,
 		offset:       0,
 		favOffset:    0,
 		hiddenOffset: 0,
+		musicOffset:  0,
 		favorites:    favs,
 		hidden:       hidden,
+		musicFavs:    mFavs,
 		showHidden:   false,
 		audio:        &AudioPlayer{},
 		playingIdx:   -1,
 		isPlaying:    false,
+		isMusic:      false,
+		musicTracks:  musicList,
+		musicPlaying: -1,
 		statusMsg:    status,
 		bars:         make([]int, 14),
 		countBuffer:  "",
 		pendingTabID: 0,
 		showHelp:     false,
+		volumeStr:    getSystemVolume(),
 	}
 }
 
@@ -867,6 +1177,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.isPlaying {
 			for i := range m.bars {
 				m.bars[i] = rand.Intn(7)
+			}
+			if m.isMusic && m.musicPlaying >= 0 && m.musicPlaying < len(m.musicTracks) {
+				m.trackElapsed = time.Since(m.trackStart)
+				curTrack := m.musicTracks[m.musicPlaying]
+				if curTrack.Duration > 0 && m.trackElapsed >= curTrack.Duration {
+					m.playMusicTrack((m.musicPlaying + 1) % len(m.musicTracks))
+				}
 			}
 		} else {
 			for i := range m.bars {
@@ -959,6 +1276,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTab = 1
 			m.clampOffsets()
 
+		case "f3":
+			m.pendingTabID++
+			m.countBuffer = ""
+			m.showHidden = false
+			m.activeTab = 2
+			m.clampOffsets()
+
+		case "r":
+			if m.activeTab == 2 {
+				m.musicTracks = loadMusicTracks()
+				m.statusMsg = fmt.Sprintf("Rescanned ~/Music (%d tracks found)", len(m.musicTracks))
+				m.clampOffsets()
+				return m, nil
+			}
+
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			m.pendingTabID++
 			m.countBuffer += msg.String()
@@ -974,24 +1306,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.showHidden {
 				m.showHidden = false
 			} else {
-				m.activeTab = (m.activeTab + 1) % 2
+				m.activeTab = (m.activeTab + 1) % 3
 			}
 			m.clampOffsets()
 
 		case "up", "k":
 			m.pendingTabID++
 			count := m.getAndResetCount()
-			c := m.getActiveCursor()
-			m.setActiveCursor(maxInt(0, c-count))
+			if m.activeTab == 2 && !m.showHidden {
+				m.musicCursor = maxInt(0, m.musicCursor-count)
+			} else {
+				c := m.getActiveCursor()
+				m.setActiveCursor(maxInt(0, c-count))
+			}
 			m.clampOffsets()
 
 		case "down", "j":
 			m.pendingTabID++
 			count := m.getAndResetCount()
-			c := m.getActiveCursor()
-			total := len(m.getActiveStations())
-			if total > 0 {
-				m.setActiveCursor(minInt(total-1, c+count))
+			if m.activeTab == 2 && !m.showHidden {
+				total := len(m.musicTracks)
+				if total > 0 {
+					m.musicCursor = minInt(total-1, m.musicCursor+count)
+				}
+			} else {
+				c := m.getActiveCursor()
+				total := len(m.getActiveStations())
+				if total > 0 {
+					m.setActiveCursor(minInt(total-1, c+count))
+				}
 			}
 			m.clampOffsets()
 
@@ -1139,27 +1482,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "f":
 			m.pendingTabID++
 			m.countBuffer = ""
-			target := m.getCurrentStation()
-			if target != nil {
-				if m.favorites[target.ID] {
-					delete(m.favorites, target.ID)
-					m.statusMsg = fmt.Sprintf("Removed %s from favorites", target.NameEn)
-					favs := m.getFavoritesList()
-					if m.favCursor >= len(favs) && m.favCursor > 0 {
-						m.favCursor = len(favs) - 1
+			if m.activeTab == 2 && !m.showHidden {
+				if m.musicCursor >= 0 && m.musicCursor < len(m.musicTracks) {
+					t := m.musicTracks[m.musicCursor]
+					if m.musicFavs[t.Path] {
+						delete(m.musicFavs, t.Path)
+						m.statusMsg = fmt.Sprintf("Removed from favorites: %s", t.Filename)
+					} else {
+						m.musicFavs[t.Path] = true
+						m.statusMsg = fmt.Sprintf("Added to favorites: %s", t.Filename)
 					}
-				} else {
-					m.favorites[target.ID] = true
-					m.statusMsg = fmt.Sprintf("Added %s to favorites", target.NameEn)
+					saveMusicFavorites(m.musicFavs)
 				}
-				saveFavorites(m.favorites)
-				m.clampOffsets()
+			} else {
+				target := m.getCurrentStation()
+				if target != nil {
+					if m.favorites[target.ID] {
+						delete(m.favorites, target.ID)
+						m.statusMsg = fmt.Sprintf("Removed %s from favorites", target.NameEn)
+						favs := m.getFavoritesList()
+						if m.favCursor >= len(favs) && m.favCursor > 0 {
+							m.favCursor = len(favs) - 1
+						}
+					} else {
+						m.favorites[target.ID] = true
+						m.statusMsg = fmt.Sprintf("Added %s to favorites", target.NameEn)
+					}
+					saveFavorites(m.favorites)
+					m.clampOffsets()
+				}
+			}
+
+		case "n":
+			if m.isMusic || m.activeTab == 2 {
+				m.selectNextMusicTrack()
+			} else {
+				m.selectNextStation()
+			}
+
+		case "p":
+			if m.isMusic || m.activeTab == 2 {
+				m.selectPrevMusicTrack()
+			} else {
+				m.selectPrevStation()
 			}
 
 		case " ", "enter":
 			m.pendingTabID++
 			m.countBuffer = ""
-			m.togglePlay()
+			if m.activeTab == 2 && !m.showHidden {
+				m.togglePlayMusic()
+			} else {
+				m.togglePlay()
+			}
 		}
 	}
 
@@ -1185,6 +1560,81 @@ func (m Model) getFavoritesList() []Station {
 	return list
 }
 
+func (m *Model) playMusicTrack(idx int) {
+	if idx < 0 || idx >= len(m.musicTracks) {
+		return
+	}
+	t := &m.musicTracks[idx]
+	if t.Duration == 0 {
+		go func(path string, index int) {
+			d := probeDuration(path)
+			if d > 0 && index < len(m.musicTracks) {
+				m.musicTracks[index].Duration = d
+			}
+		}(t.Path, idx)
+	}
+
+	err := m.audio.Play(t.Path)
+	if err != nil {
+		m.statusMsg = fmt.Sprintf("Audio Error: %v", err)
+		m.isPlaying = false
+		m.isMusic = false
+		return
+	}
+
+	m.isPlaying = true
+	m.isMusic = true
+	m.musicPlaying = idx
+	m.playingIdx = -1
+	m.trackStart = time.Now()
+	m.trackElapsed = 0
+	m.statusMsg = fmt.Sprintf("Playing track: %s", t.Filename)
+	if m.mpris != nil {
+		m.mpris.UpdateMusic("Playing", t)
+	}
+}
+
+func (m *Model) togglePlayMusic() {
+	if len(m.musicTracks) == 0 {
+		return
+	}
+	if m.isPlaying && m.isMusic && m.musicPlaying == m.musicCursor {
+		m.audio.Stop()
+		m.isPlaying = false
+		m.isMusic = false
+		m.statusMsg = fmt.Sprintf("Stopped: %s", m.musicTracks[m.musicCursor].Filename)
+		if m.mpris != nil {
+			m.mpris.UpdateMusic("Stopped", nil)
+		}
+		return
+	}
+	m.playMusicTrack(m.musicCursor)
+}
+
+func (m *Model) selectNextMusicTrack() {
+	if len(m.musicTracks) == 0 {
+		return
+	}
+	next := 0
+	if m.musicPlaying >= 0 {
+		next = (m.musicPlaying + 1) % len(m.musicTracks)
+	}
+	m.musicCursor = next
+	m.playMusicTrack(next)
+}
+
+func (m *Model) selectPrevMusicTrack() {
+	if len(m.musicTracks) == 0 {
+		return
+	}
+	prev := 0
+	if m.musicPlaying >= 0 {
+		prev = (m.musicPlaying - 1 + len(m.musicTracks)) % len(m.musicTracks)
+	}
+	m.musicCursor = prev
+	m.playMusicTrack(prev)
+}
+
 func (m *Model) togglePlay() {
 	target := m.getCurrentStation()
 	if target == nil {
@@ -1199,7 +1649,7 @@ func (m *Model) togglePlay() {
 		}
 	}
 
-	if m.isPlaying && m.playingIdx == targetIdx {
+	if m.isPlaying && !m.isMusic && m.playingIdx == targetIdx {
 		m.audio.Stop()
 		m.isPlaying = false
 		m.statusMsg = fmt.Sprintf("Stopped: %s", target.NameEn)
@@ -1217,6 +1667,8 @@ func (m *Model) togglePlay() {
 	}
 
 	m.isPlaying = true
+	m.isMusic = false
+	m.musicPlaying = -1
 	m.playingIdx = targetIdx
 	m.statusMsg = fmt.Sprintf("Playing live: [%s] %s", target.Region, target.NameEn)
 	if m.mpris != nil {
@@ -1488,16 +1940,19 @@ func (m Model) renderHelpBox() string {
 		row("gg / G", "Jump to First / Last station"),
 		"",
 		sectionStyle.Render("── Controls & Playback ─────────────────────────────"),
-		row("Enter / Space", "Play / Stop selected station"),
-		row("f", "Toggle station in/out of Favorites"),
-		row("d", "Hide non-working station / change back (unhide)"),
-		row("H", "Toggle viewing hidden stations"),
-		row("Tab  (or F1 / F2)", "Switch between All Stations and Favorites"),
+		row("Enter / Space", "Play / Stop selected station / track"),
+		row("n / p", "Next / Previous track or station"),
+		row("f", "Toggle station / track in Favorites"),
+		row("d", "Hide non-working radio station / restore"),
+		row("H", "Toggle viewing hidden radio stations"),
+		row("r", "Rescan ~/Music directory for audio files"),
+		row("Tab / F1-F3", "Switch tabs: Stations, Favorites, Music"),
 		row("? / Esc", "Toggle / close this Help popup"),
-		row("q / Ctrl+c", "Quit iradio"),
+		row("q / Ctrl+c", "Quit player"),
 		"",
-		sectionStyle.Render("── Custom Stations ─────────────────────────────────"),
-		bgStyle.Render("  ") + dimStyle.Render("Config: ") + descStyle.Render("~/.config/iradio/stations.json"),
+		sectionStyle.Render("── Music & Custom Stations ─────────────────────────"),
+		bgStyle.Render("  ") + dimStyle.Render("Music Dir: ") + descStyle.Render("~/Music (*.mp3, *.lrc)"),
+		bgStyle.Render("  ") + dimStyle.Render("Radio Cfg: ") + descStyle.Render("~/.config/iradio/stations.json"),
 		"",
 		dimStyle.Render("Press [?] or [Esc] to return to player"),
 	}
@@ -1537,18 +1992,29 @@ func (m Model) renderMainView() string {
 		visibleAll := m.getVisibleAllStations()
 		favsList := m.getFavoritesList()
 		favCount := len(favsList)
+		musicCount := len(m.musicTracks)
 
-		var tab1, tab2 string
+		var tab1, tab2, tab3 string
 		if m.activeTab == 0 {
 			tab1 = activeTabStyle.Render(fmt.Sprintf("1: All Stations (%d/%d) [F1]", m.cursor+1, len(visibleAll)))
 			tab2 = inactiveTabStyle.Render(fmt.Sprintf("2: Favorites (%d) [F2]", favCount))
-		} else {
+			tab3 = inactiveTabStyle.Render(fmt.Sprintf("3: Music (%d) [F3]", musicCount))
+		} else if m.activeTab == 1 {
 			currentFavPos := 0
 			if favCount > 0 {
 				currentFavPos = m.favCursor + 1
 			}
 			tab1 = inactiveTabStyle.Render(fmt.Sprintf("1: All Stations (%d) [F1]", len(visibleAll)))
 			tab2 = activeTabStyle.Render(fmt.Sprintf("2: Favorites (%d/%d) [F2]", currentFavPos, favCount))
+			tab3 = inactiveTabStyle.Render(fmt.Sprintf("3: Music (%d) [F3]", musicCount))
+		} else {
+			currentMusicPos := 0
+			if musicCount > 0 {
+				currentMusicPos = m.musicCursor + 1
+			}
+			tab1 = inactiveTabStyle.Render(fmt.Sprintf("1: All Stations (%d) [F1]", len(visibleAll)))
+			tab2 = inactiveTabStyle.Render(fmt.Sprintf("2: Favorites (%d) [F2]", favCount))
+			tab3 = activeTabStyle.Render(fmt.Sprintf("3: Music (%d/%d) [F3]", currentMusicPos, musicCount))
 		}
 
 		hiddenBadge := ""
@@ -1557,13 +2023,23 @@ func (m Model) renderMainView() string {
 		}
 
 		scrollInfo := ""
-		if totalItems > listHeight {
+		if m.activeTab != 2 && totalItems > listHeight {
 			endIdx := minInt(totalItems, currentOffset+listHeight)
 			scrollInfo = lipgloss.NewStyle().Foreground(colorSubtext).Render(
 				fmt.Sprintf("  [Showing %d-%d of %d]", currentOffset+1, endIdx, totalItems),
 			)
+		} else if m.activeTab == 2 && musicCount > listHeight {
+			endIdx := minInt(musicCount, m.musicOffset+listHeight)
+			scrollInfo = lipgloss.NewStyle().Foreground(colorSubtext).Render(
+				fmt.Sprintf("  [Showing %d-%d of %d]", m.musicOffset+1, endIdx, musicCount),
+			)
 		}
-		tabsRow = lipgloss.JoinHorizontal(lipgloss.Center, tab1, " ", tab2, hiddenBadge, scrollInfo)
+		tabsRow = lipgloss.JoinHorizontal(lipgloss.Center, tab1, " ", tab2, " ", tab3, hiddenBadge, scrollInfo)
+	}
+
+	// If Music Tab is selected and not in Hidden mode, render the reference Terminal Music Player view
+	if m.activeTab == 2 && !m.showHidden {
+		return m.renderMusicView(header, tabsRow, contentWidth, listHeight)
 	}
 
 	// 3. Station List (Strictly budgeted to listHeight lines for full-screen view)
@@ -1727,6 +2203,223 @@ func (m Model) renderMainView() string {
 		listBlock,
 		"",
 		playerCard,
+		"",
+		footer,
+	)
+
+	return lipgloss.NewStyle().Padding(1, 2).Render(body)
+}
+
+func (m Model) renderMusicView(header, tabsRow string, contentWidth, listHeight int) string {
+	boxBorder := lipgloss.Border{
+		Top:         "─",
+		Bottom:      "─",
+		Left:        "│",
+		Right:       "│",
+		TopLeft:     "┌",
+		TopRight:    "┐",
+		BottomLeft:  "└",
+		BottomRight: "┘",
+	}
+
+	// 1. Top Panel: Terminal Music Player
+	playerState := "stopped"
+	if m.isPlaying && m.isMusic {
+		playerState = "playing"
+	}
+	topTitle := lipgloss.NewStyle().Foreground(colorCyan).Bold(true).Render("Terminal Music Player")
+	topContent := fmt.Sprintf("State: %s • Volume: %s [System (ALSA)]", playerState, m.volumeStr)
+	topBox := lipgloss.NewStyle().
+		Border(boxBorder).
+		BorderForeground(colorCyan).
+		Width(contentWidth).
+		Render(fmt.Sprintf("%s\n%s", topTitle, topContent))
+
+	// Layout Widths
+	leftWidth := (contentWidth * 48) / 100
+	if leftWidth < 32 {
+		leftWidth = 32
+	}
+	rightWidth := contentWidth - leftWidth - 2
+	if rightWidth < 25 {
+		rightWidth = 25
+	}
+
+	// 2. Left Panel: Library
+	var libLines []string
+	libLines = append(libLines, lipgloss.NewStyle().Foreground(colorYellow).Bold(true).Render("Library"))
+	totalTracks := len(m.musicTracks)
+
+	if totalTracks == 0 {
+		libLines = append(libLines, lipgloss.NewStyle().Foreground(colorSubtext).Render("  No tracks found in ~/Music"))
+		libLines = append(libLines, lipgloss.NewStyle().Foreground(colorSubtext).Render("  Drop .mp3 files in ~/Music and press 'r'"))
+		for len(libLines) < listHeight {
+			libLines = append(libLines, "")
+		}
+	} else {
+		for row := 0; row < listHeight-1; row++ {
+			idx := m.musicOffset + row
+			if idx < totalTracks {
+				t := m.musicTracks[idx]
+				isSelected := (idx == m.musicCursor)
+				isThisPlaying := (m.isPlaying && m.isMusic && m.musicPlaying == idx)
+
+				relDist := absInt(idx - m.musicCursor)
+				relMarker := fmt.Sprintf(" %2d ", relDist)
+				if isSelected {
+					relMarker = lipgloss.NewStyle().Foreground(colorMauve).Bold(true).Render(fmt.Sprintf("»%2d ", relDist))
+				}
+
+				playSymbol := " "
+				if isThisPlaying {
+					playSymbol = "▶"
+				}
+
+				heartSymbol := "♡"
+				if m.musicFavs[t.Path] {
+					heartSymbol = "♥"
+				}
+
+				itemLead := fmt.Sprintf("%s%s%s ", relMarker, playSymbol, heartSymbol)
+				availW := maxInt(10, leftWidth-lipgloss.Width(itemLead)-4)
+				nameText := fitWidth(t.Filename, availW)
+
+				if isSelected {
+					libLines = append(libLines, itemLead+lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(nameText))
+				} else {
+					libLines = append(libLines, itemLead+lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4")).Render(nameText))
+				}
+			} else {
+				libLines = append(libLines, "")
+			}
+		}
+	}
+	libraryBox := lipgloss.NewStyle().
+		Border(boxBorder).
+		BorderForeground(colorYellow).
+		Width(leftWidth).
+		Height(listHeight).
+		Render(strings.Join(libLines, "\n"))
+
+	// 3. Right Panels
+	var curTrack MusicTrack
+	if m.musicPlaying >= 0 && m.musicPlaying < len(m.musicTracks) {
+		curTrack = m.musicTracks[m.musicPlaying]
+	} else if m.musicCursor >= 0 && m.musicCursor < len(m.musicTracks) {
+		curTrack = m.musicTracks[m.musicCursor]
+	}
+
+	// 3a. Now Box
+	var nowLines []string
+	nowLines = append(nowLines, lipgloss.NewStyle().Foreground(colorCyan).Bold(true).Render("Now"))
+	if totalTracks > 0 {
+		labelStyle := lipgloss.NewStyle().Foreground(colorMauve).Bold(true)
+		valStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4"))
+		avail := maxInt(10, rightWidth-10)
+
+		nowLines = append(nowLines, labelStyle.Render("Track:  ")+valStyle.Render(fitWidth(curTrack.Filename, avail)))
+		nowLines = append(nowLines, labelStyle.Render("Artist: ")+valStyle.Render(fitWidth(curTrack.Artist, avail)))
+		nowLines = append(nowLines, labelStyle.Render("Album:  ")+valStyle.Render(fitWidth(curTrack.Album, avail)))
+		dispIdx := m.musicCursor + 1
+		if m.musicPlaying >= 0 {
+			dispIdx = m.musicPlaying + 1
+		}
+		nowLines = append(nowLines, labelStyle.Render("Index:  ")+valStyle.Render(fmt.Sprintf("%d / %d", dispIdx, totalTracks)))
+	} else {
+		nowLines = append(nowLines, lipgloss.NewStyle().Foreground(colorSubtext).Render("No track loaded"))
+	}
+	nowBox := lipgloss.NewStyle().
+		Border(boxBorder).
+		BorderForeground(colorCyan).
+		Width(rightWidth).
+		Render(strings.Join(nowLines, "\n"))
+
+	// 3b. Progress Box
+	var progLines []string
+	progLines = append(progLines, lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("Progress"))
+	elapsedSecs := int(m.trackElapsed.Seconds())
+	totalSecs := int(curTrack.Duration.Seconds())
+	if !m.isPlaying || !m.isMusic {
+		elapsedSecs = 0
+	}
+	timeText := fmt.Sprintf("%02d:%02d / %02d:%02d", elapsedSecs/60, elapsedSecs%60, totalSecs/60, totalSecs%60)
+	if totalSecs <= 0 {
+		timeText = fmt.Sprintf("%02d:%02d / --:--", elapsedSecs/60, elapsedSecs%60)
+	}
+
+	barWidth := maxInt(5, rightWidth-lipgloss.Width(timeText)-6)
+	var progBar strings.Builder
+	if totalSecs > 0 && barWidth > 2 {
+		ratio := float64(elapsedSecs) / float64(totalSecs)
+		if ratio > 1.0 {
+			ratio = 1.0
+		}
+		filled := int(ratio * float64(barWidth))
+		progBar.WriteString(strings.Repeat("━", filled))
+		progBar.WriteString("█")
+		if barWidth-filled-1 > 0 {
+			progBar.WriteString(strings.Repeat("─", barWidth-filled-1))
+		}
+	} else {
+		progBar.WriteString("█")
+		if barWidth > 1 {
+			progBar.WriteString(strings.Repeat("─", barWidth-1))
+		}
+	}
+	progStyled := lipgloss.NewStyle().Foreground(colorGreen).Render(progBar.String())
+	progLine := fmt.Sprintf("%s   %s", progStyled, lipgloss.NewStyle().Foreground(colorSubtext).Render(timeText))
+	progLines = append(progLines, progLine)
+
+	progressBox := lipgloss.NewStyle().
+		Border(boxBorder).
+		BorderForeground(colorGreen).
+		Width(rightWidth).
+		Render(strings.Join(progLines, "\n"))
+
+	// 3c. Lyrics Box
+	var lyrLines []string
+	lyrLines = append(lyrLines, lipgloss.NewStyle().Foreground(colorCyan).Bold(true).Render("Lyrics"))
+	if len(curTrack.Lyrics) > 0 && m.isPlaying && m.isMusic {
+		activeIdx := 0
+		for i, line := range curTrack.Lyrics {
+			if line.Time <= m.trackElapsed {
+				activeIdx = i
+			} else {
+				break
+			}
+		}
+		titleLine := lipgloss.NewStyle().Foreground(colorYellow).Bold(true).Render(fitWidth(curTrack.Filename, rightWidth-4))
+		activeLine := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(fitWidth(curTrack.Lyrics[activeIdx].Text, rightWidth-4))
+		lyrLines = append(lyrLines, titleLine, activeLine)
+	} else {
+		titleLine := lipgloss.NewStyle().Foreground(colorYellow).Bold(true).Render(fitWidth(curTrack.Filename, rightWidth-4))
+		status := "(No synchronized .lrc file found)"
+		if len(curTrack.Lyrics) > 0 {
+			status = curTrack.Lyrics[0].Text
+		}
+		lyrLines = append(lyrLines, titleLine, lipgloss.NewStyle().Foreground(colorSubtext).Render(status))
+	}
+
+	lyricsBox := lipgloss.NewStyle().
+		Border(boxBorder).
+		BorderForeground(colorCyan).
+		Width(rightWidth).
+		Render(strings.Join(lyrLines, "\n"))
+
+	rightColumn := lipgloss.JoinVertical(lipgloss.Left, nowBox, progressBox, lyricsBox)
+	mainSplit := lipgloss.JoinHorizontal(lipgloss.Top, libraryBox, " ", rightColumn)
+
+	footerText := "[Enter/Space] Play/Pause • [f] Fav • [n/p] Next/Prev • [r] Rescan ~/Music • [Tab] Switch • [?] Help • [q] Quit"
+	footer := helpStyle.Render(footerText)
+
+	body := lipgloss.JoinVertical(
+		lipgloss.Left,
+		header,
+		"",
+		tabsRow,
+		"",
+		topBox,
+		mainSplit,
 		"",
 		footer,
 	)
