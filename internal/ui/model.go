@@ -392,6 +392,44 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case mpris.ActionMsg:
+		switch msg.Action {
+		case "playpause":
+			if m.isMusic || m.activeTab == 2 {
+				m.togglePlayMusic()
+			} else {
+				m.togglePlay()
+			}
+		case "play":
+			if !m.isPlaying {
+				if m.isMusic || m.activeTab == 2 {
+					m.togglePlayMusic()
+				} else {
+					m.togglePlay()
+				}
+			}
+		case "pause", "stop":
+			if m.isPlaying {
+				if m.isMusic {
+					m.togglePlayMusic()
+				} else {
+					m.togglePlay()
+				}
+			}
+		case "next":
+			if m.isMusic || m.activeTab == 2 {
+				m.selectNextMusicTrack()
+			} else {
+				m.selectNextStation()
+			}
+		case "previous":
+			if m.isMusic || m.activeTab == 2 {
+				m.selectPrevMusicTrack()
+			} else {
+				m.selectPrevStation()
+			}
+		}
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -483,6 +521,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.isMusic && m.musicPlaying >= 0 && m.musicPlaying < len(m.musicTracks) {
 				m.trackElapsed = time.Since(m.trackStart)
+				if m.mprisSvc != nil && int(m.trackElapsed.Milliseconds())%500 < 40 {
+					m.mprisSvc.UpdatePosition(m.trackElapsed)
+				}
 				curTrack := m.musicTracks[m.musicPlaying]
 				if curTrack.Duration > 0 && m.trackElapsed >= curTrack.Duration {
 					m.playMusicTrack((m.musicPlaying + 1) % len(m.musicTracks))
@@ -892,6 +933,9 @@ func (m *Model) playMusicTrack(idx int) {
 				d := music.ProbeDuration(path)
 				if d > 0 && index < len(m.musicTracks) {
 					m.musicTracks[index].Duration = d
+					if m.isPlaying && m.isMusic && m.musicPlaying == index && m.mprisSvc != nil {
+						m.mprisSvc.UpdateMusic("Playing", &m.musicTracks[index])
+					}
 				}
 			}(t.Path, idx)
 		}

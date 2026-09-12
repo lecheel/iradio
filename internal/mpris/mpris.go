@@ -3,6 +3,9 @@
 package mpris
 
 import (
+	"fmt"
+	"time"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/prop"
@@ -114,15 +117,16 @@ func Start(p *tea.Program) *Service {
 			"CanQuit":             {Value: true, Writable: false, Emit: prop.EmitTrue},
 			"CanRaise":            {Value: false, Writable: false, Emit: prop.EmitTrue},
 			"HasTrackList":        {Value: false, Writable: false, Emit: prop.EmitTrue},
-			"Identity":            {Value: "HK & Taiwan Internet Radio", Writable: false, Emit: prop.EmitTrue},
-			"SupportedUriSchemes": {Value: []string{"http", "https"}, Writable: false, Emit: prop.EmitTrue},
-			"SupportedMimeTypes":  {Value: []string{"audio/mpeg", "application/x-mpegurl", "audio/aac"}, Writable: false, Emit: prop.EmitTrue},
+			"Identity":            {Value: "iradio Player", Writable: false, Emit: prop.EmitTrue},
+			"SupportedUriSchemes": {Value: []string{"http", "https", "file"}, Writable: false, Emit: prop.EmitTrue},
+			"SupportedMimeTypes":  {Value: []string{"audio/mpeg", "audio/flac", "audio/mp4", "audio/x-m4a", "audio/ogg", "audio/wav", "application/x-mpegurl", "audio/aac"}, Writable: false, Emit: prop.EmitTrue},
 		},
 		"org.mpris.MediaPlayer2.Player": {
 			"PlaybackStatus": {Value: "Stopped", Writable: false, Emit: prop.EmitTrue},
 			"Rate":           {Value: 1.0, Writable: false, Emit: prop.EmitTrue},
 			"Metadata":       {Value: map[string]dbus.Variant{}, Writable: false, Emit: prop.EmitTrue},
 			"Volume":         {Value: 1.0, Writable: false, Emit: prop.EmitTrue},
+			"Position":       {Value: int64(0), Writable: false, Emit: prop.EmitFalse},
 			"CanControl":     {Value: true, Writable: false, Emit: prop.EmitTrue},
 			"CanPlay":        {Value: true, Writable: false, Emit: prop.EmitTrue},
 			"CanPause":       {Value: true, Writable: false, Emit: prop.EmitTrue},
@@ -153,7 +157,8 @@ func (m *Service) Update(status string, s *stations.Station) {
 
 	meta := map[string]dbus.Variant{}
 	if s != nil {
-		meta["mpris:trackid"] = dbus.MakeVariant(dbus.ObjectPath("/org/mpris/MediaPlayer2/track/0"))
+		trackPath := dbus.ObjectPath(fmt.Sprintf("/org/mpris/MediaPlayer2/track/radio/%s", s.ID))
+		meta["mpris:trackid"] = dbus.MakeVariant(trackPath)
 		meta["xesam:title"] = dbus.MakeVariant(s.NameZh + " (" + s.NameEn + ")")
 		broadcaster := "RTHK 香港電台"
 		if s.Region == "TW" {
@@ -167,8 +172,14 @@ func (m *Service) Update(status string, s *stations.Station) {
 		}
 		meta["xesam:artist"] = dbus.MakeVariant([]string{broadcaster})
 		meta["xesam:album"] = dbus.MakeVariant(s.Dial)
+		if s.StreamURL != "" {
+			meta["xesam:url"] = dbus.MakeVariant(s.StreamURL)
+		}
+	} else {
+		meta["mpris:trackid"] = dbus.MakeVariant(dbus.ObjectPath("/org/mpris/MediaPlayer2/TrackList/NoTrack"))
 	}
 	m.properties.Set("org.mpris.MediaPlayer2.Player", "Metadata", dbus.MakeVariant(meta))
+	m.properties.Set("org.mpris.MediaPlayer2.Player", "Position", dbus.MakeVariant(int64(0)))
 }
 
 // UpdateMusic refreshes MPRIS metadata for a local music track.
@@ -179,10 +190,28 @@ func (m *Service) UpdateMusic(status string, t *music.MusicTrack) {
 	m.properties.Set("org.mpris.MediaPlayer2.Player", "PlaybackStatus", dbus.MakeVariant(status))
 	meta := map[string]dbus.Variant{}
 	if t != nil {
-		meta["mpris:trackid"] = dbus.MakeVariant(dbus.ObjectPath("/org/mpris/MediaPlayer2/track/music"))
+		trackPath := dbus.ObjectPath(fmt.Sprintf("/org/mpris/MediaPlayer2/track/music/%d", time.Now().UnixNano()))
+		meta["mpris:trackid"] = dbus.MakeVariant(trackPath)
 		meta["xesam:title"] = dbus.MakeVariant(t.Title)
 		meta["xesam:artist"] = dbus.MakeVariant([]string{t.Artist})
 		meta["xesam:album"] = dbus.MakeVariant(t.Album)
+		if t.Duration > 0 {
+			meta["mpris:length"] = dbus.MakeVariant(int64(t.Duration.Microseconds()))
+		}
+		if t.Path != "" {
+			meta["xesam:url"] = dbus.MakeVariant("file://" + t.Path)
+		}
+	} else {
+		meta["mpris:trackid"] = dbus.MakeVariant(dbus.ObjectPath("/org/mpris/MediaPlayer2/TrackList/NoTrack"))
 	}
 	m.properties.Set("org.mpris.MediaPlayer2.Player", "Metadata", dbus.MakeVariant(meta))
+	m.properties.Set("org.mpris.MediaPlayer2.Player", "Position", dbus.MakeVariant(int64(0)))
+}
+
+// UpdatePosition updates the current track position in microseconds.
+func (m *Service) UpdatePosition(pos time.Duration) {
+	if !m.active || m.properties == nil {
+		return
+	}
+	m.properties.Set("org.mpris.MediaPlayer2.Player", "Position", dbus.MakeVariant(int64(pos.Microseconds())))
 }
